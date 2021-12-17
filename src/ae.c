@@ -68,8 +68,9 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     int i;
 
     monotonicInit();    /* just in case the calling app didn't initialize */
-
+	// 为 eventLoop分配空间
     if ((eventLoop = zmalloc(sizeof(*eventLoop))) == NULL) goto err;
+	// 为eventLoop的events分配事件空间
     eventLoop->events = zmalloc(sizeof(aeFileEvent)*setsize);
     eventLoop->fired = zmalloc(sizeof(aeFiredEvent)*setsize);
     if (eventLoop->events == NULL || eventLoop->fired == NULL) goto err;
@@ -161,6 +162,7 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         errno = ERANGE;
         return AE_ERR;
     }
+	// eventLoop持有IO(fd)文件描述符
     aeFileEvent *fe = &eventLoop->events[fd];
 
     if (aeApiAddEvent(eventLoop, fd, mask) == -1)
@@ -392,12 +394,13 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 
         /* Call the multiplexing API, will return only on timeout or when
          * some event fires. */
+         // 调用底层API获取事件数(如果是linux一般就是epoll多路复用器的事件)
         numevents = aeApiPoll(eventLoop, tvp);
 
         /* After sleep callback. */
         if (eventLoop->aftersleep != NULL && flags & AE_CALL_AFTER_SLEEP)
             eventLoop->aftersleep(eventLoop);
-
+		// 根据事件集，执行
         for (j = 0; j < numevents; j++) {
             aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
             int mask = eventLoop->fired[j].mask;
@@ -482,8 +485,8 @@ int aeWait(int fd, int mask, long long milliseconds) {
 }
 
 void aeMain(aeEventLoop *eventLoop) {
-    eventLoop->stop = 0;
-    while (!eventLoop->stop) {
+    eventLoop->stop = 0; // 设置停止状态
+    while (!eventLoop->stop) { 
         aeProcessEvents(eventLoop, AE_ALL_EVENTS|
                                    AE_CALL_BEFORE_SLEEP|
                                    AE_CALL_AFTER_SLEEP);

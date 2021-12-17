@@ -2631,7 +2631,7 @@ void createSharedObjects(void) {
 
 void initServerConfig(void) {
     int j;
-
+	// 更新缓存时间
     updateCachedTime(1);
     getRandomHexChars(server.runid,CONFIG_RUN_ID_SIZE);
     server.runid[CONFIG_RUN_ID_SIZE] = '\0';
@@ -2655,6 +2655,7 @@ void initServerConfig(void) {
     server.saveparams = NULL;
     server.loading = 0;
     server.loading_rdb_used_mem = 0;
+	// 创建日志文件
     server.logfile = zstrdup(CONFIG_DEFAULT_LOGFILE);
     server.aof_state = AOF_OFF;
     server.aof_rewrite_base_size = 0;
@@ -2767,7 +2768,7 @@ void initServerConfig(void) {
     /* Client Pause related */
     server.client_pause_type = CLIENT_PAUSE_OFF;
     server.client_pause_end_time = 0;   
-
+	// 初始化值
     initConfigValues();
 }
 
@@ -3011,6 +3012,8 @@ int createSocketAcceptHandler(socketFds *sfd, aeFileProc *accept_handler) {
     int j;
 
     for (j = 0; j < sfd->count; j++) {
+		// 创建IO事件(FileEvent)并绑定到eventLoop上
+		// 监听的FD:(6379) sfd->fd[j]
         if (aeCreateFileEvent(server.el, sfd->fd[j], AE_READABLE, accept_handler,NULL) == AE_ERR) {
             /* Rollback */
             for (j = j-1; j >= 0; j--) aeDeleteFileEvent(server.el, sfd->fd[j], AE_READABLE);
@@ -3144,6 +3147,7 @@ void initServer(void) {
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     setupSignalHandlers();
+	// 设置线程可关闭权限
     makeThreadKillable();
 
     if (server.syslog_enabled) {
@@ -3191,6 +3195,7 @@ void initServer(void) {
     adjustOpenFilesLimit();
     const char *clk_msg = monotonicInit();
     serverLog(LL_NOTICE, "monotonic clock: %s", clk_msg);
+	// 创建了EventLoop 事件循环器
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
@@ -3202,7 +3207,7 @@ void initServer(void) {
 
     /* Open the TCP listening socket for the user commands. */
     if (server.port != 0 &&
-        listenToPort(server.port,&server.ipfd) == C_ERR) {
+        listenToPort(server.port,&server.ipfd) == C_ERR) { // 创建端口监听port，
         serverLog(LL_WARNING, "Failed listening on port %u (TCP), aborting.", server.port);
         exit(1);
     }
@@ -3245,6 +3250,7 @@ void initServer(void) {
         listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
     }
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
+	// 给redisServer结构体，设置默认的属性
     server.pubsub_channels = dictCreate(&keylistDictType,NULL);
     server.pubsub_patterns = dictCreate(&keylistDictType,NULL);
     server.cronloops = 0;
@@ -3298,6 +3304,7 @@ void initServer(void) {
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
      * expired keys and so forth. */
+    // 给事件循环eventLoop 设置属性，
     if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
         exit(1);
@@ -3305,6 +3312,7 @@ void initServer(void) {
 
     /* Create an event handler for accepting new connections in TCP and Unix
      * domain sockets. */
+     // 创建socketHandler用于 接受客户端请求
     if (createSocketAcceptHandler(&server.ipfd, acceptTcpHandler) != C_OK) {
         serverPanic("Unrecoverable error creating TCP socket accept handler.");
     }
@@ -3317,6 +3325,7 @@ void initServer(void) {
 
     /* Register a readable event for the pipe used to awake the event loop
      * when a blocked client in a module needs attention. */
+     // 创建FileEvent，用户处理？
     if (aeCreateFileEvent(server.el, server.module_blocked_pipe[0], AE_READABLE,
         moduleBlockedClientPipeReadable,NULL) == AE_ERR) {
             serverPanic(
@@ -3326,6 +3335,7 @@ void initServer(void) {
 
     /* Register before and after sleep handlers (note this needs to be done
      * before loading persistence since it is used by processEventsWhileBlocked. */
+    // eventLoop绑定睡前，睡后的操作
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeSetAfterSleepProc(server.el,afterSleep);
 
@@ -3352,11 +3362,15 @@ void initServer(void) {
 
     if (server.cluster_enabled) clusterInit();
     replicationScriptCacheInit();
+	// 可执行得lua脚本init
     scriptingInit(1);
+	// 慢日志init
     slowlogInit();
+	// 监控延迟init
     latencyMonitorInit();
     
     /* Initialize ACL default password if it exists */
+	// ACL 更新用户得默认密码
     ACLUpdateDefaultUserPassword(server.requirepass);
 }
 
@@ -3367,6 +3381,7 @@ void initServer(void) {
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
 void InitServerLast() {
     bioInit();
+	// 初始化IO线程，用于处理IO的读/写
     initThreadedIO();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
     server.initial_memory_usage = zmalloc_used_memory();
@@ -5779,7 +5794,8 @@ void setupSignalHandlers(void) {
 
     /* When the SA_SIGINFO flag is set in sa_flags then sa_sigaction is used.
      * Otherwise, sa_handler is used. */
-    sigemptyset(&act.sa_mask);
+	// 初始化信号量
+	sigemptyset(&act.sa_mask);
     act.sa_flags = 0;
     act.sa_handler = sigShutdownHandler;
     sigaction(SIGTERM, &act, NULL);
@@ -6221,11 +6237,14 @@ int main(int argc, char **argv) {
     getRandomBytes(hashseed,sizeof(hashseed));
     dictSetHashFunctionSeed(hashseed);
     server.sentinel_mode = checkForSentinelMode(argc,argv);
+	// 初始化server的配置
     initServerConfig();
+	// ACL用户权限init，6.x得新特性
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
     moduleInitModulesSystem();
-    tlsInit();
+
+	tlsInit();
 
     /* Store the executable path and arguments in a safe place in order
      * to be able to restart the server later. */
@@ -6237,7 +6256,9 @@ int main(int argc, char **argv) {
     /* We need to init sentinel right now as parsing the configuration file
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
+    // 哨兵模式下，初始化
     if (server.sentinel_mode) {
+		// 初始化 哨兵模式
         initSentinelConfig();
         initSentinel();
     }
@@ -6327,12 +6348,13 @@ int main(int argc, char **argv) {
     }
 
     readOOMScoreAdj();
+	// 初始化服务
     initServer();
     if (background || server.pidfile) createPidFile();
     if (server.set_proc_title) redisSetProcTitle(NULL);
     redisAsciiArt();
     checkTcpBacklogSettings();
-
+	// 非哨兵模式下的初始化
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
         serverLog(LL_WARNING,"Server initialized");
@@ -6354,11 +6376,15 @@ int main(int argc, char **argv) {
             }
         }
     #endif /* __arm64__ */
+	
     #endif /* __linux__ */
+	// linux系统下的初始化
         moduleInitModulesSystemLast();
         moduleLoadFromQueue();
         ACLLoadUsersAtStartup();
+		// server初始化之后，初始化IO线程
         InitServerLast();
+		// 加载备份数据，或者是断电恢复操作
         loadDataFromDisk();
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {
@@ -6380,7 +6406,7 @@ int main(int argc, char **argv) {
             }
             redisCommunicateSystemd("READY=1\n");
         }
-    } else {
+    } else { // 哨兵模式下init
         ACLLoadUsersAtStartup();
         InitServerLast();
         sentinelIsRunning();
@@ -6394,7 +6420,7 @@ int main(int argc, char **argv) {
     if (server.maxmemory > 0 && server.maxmemory < 1024*1024) {
         serverLog(LL_WARNING,"WARNING: You specified a maxmemory value that is less than 1MB (current value is %llu bytes). Are you sure this is what you really want?", server.maxmemory);
     }
-
+	
     redisSetCpuAffinity(server.server_cpulist);
     setOOMScoreAdj(-1);
 

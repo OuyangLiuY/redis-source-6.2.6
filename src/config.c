@@ -382,6 +382,7 @@ static int updateOOMScoreAdjValues(sds *args, const char **err, int apply) {
 }
 
 void initConfigValues() {
+	// 循环调用，初始化配置文件中的data数据
     for (standardConfig *config = configs; config->name != NULL; config++) {
         config->interface.init(config->data);
     }

@@ -436,7 +436,7 @@ static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backl
         bindaddr = NULL;
     if (af == AF_INET6 && bindaddr && !strcmp("::*", bindaddr))
         bindaddr = NULL;
-
+	
     if ((rv = getaddrinfo(bindaddr,_port,&hints,&servinfo)) != 0) {
         anetSetError(err, "%s", gai_strerror(rv));
         return ANET_ERR;

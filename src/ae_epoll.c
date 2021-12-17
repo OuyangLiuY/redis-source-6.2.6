@@ -76,6 +76,7 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     struct epoll_event ee = {0}; /* avoid valgrind warning */
     /* If the fd was already monitored for some event, we need a MOD
      * operation. Otherwise we need an ADD operation. */
+     // 获取op动作类型
     int op = eventLoop->events[fd].mask == AE_NONE ?
             EPOLL_CTL_ADD : EPOLL_CTL_MOD;
 
@@ -84,6 +85,7 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     if (mask & AE_READABLE) ee.events |= EPOLLIN;
     if (mask & AE_WRITABLE) ee.events |= EPOLLOUT;
     ee.data.fd = fd;
+	// 将op要操作的类型 添加到 epoll中用来
     if (epoll_ctl(state->epfd,op,fd,&ee) == -1) return -1;
     return 0;
 }
@@ -109,7 +111,7 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
     int retval, numevents = 0;
-
+	// 返回底层的epoll等待事件集
     retval = epoll_wait(state->epfd,state->events,eventLoop->setsize,
             tvp ? (tvp->tv_sec*1000 + (tvp->tv_usec + 999)/1000) : -1);
     if (retval > 0) {

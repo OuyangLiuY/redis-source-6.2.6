@@ -3492,6 +3492,7 @@ void *IOThreadMain(void *myid) {
         listNode *ln;
         listRewind(io_threads_list[id],&li);
         while((ln = listNext(&li))) {
+			// 获取客户端，从链表中获取
             client *c = listNodeValue(ln);
             if (io_threads_op == IO_THREADS_OP_WRITE) {
                 writeToClient(c,0);
@@ -3531,6 +3532,7 @@ void initThreadedIO(void) {
         pthread_mutex_init(&io_threads_mutex[i],NULL);
         setIOPendingCount(i, 0);
         pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
+		// IOThreadMain 就是Java中的run方法
         if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);

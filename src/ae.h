@@ -69,10 +69,11 @@ typedef void aeEventFinalizerProc(struct aeEventLoop *eventLoop, void *clientDat
 typedef void aeBeforeSleepProc(struct aeEventLoop *eventLoop);
 
 /* File event structure */
+// File event 可以理解成：IO事件结构体
 typedef struct aeFileEvent {
     int mask; /* one of AE_(READABLE|WRITABLE|BARRIER) */
-    aeFileProc *rfileProc;
-    aeFileProc *wfileProc;
+    aeFileProc *rfileProc;  //代表了，写事件的回调
+    aeFileProc *wfileProc; //代表了，读事件的回调
     void *clientData;
 } aeFileEvent;
 
@@ -97,14 +98,20 @@ typedef struct aeFiredEvent {
 
 /* State of an event based program */
 typedef struct aeEventLoop {
+	// 当前持有的最高级的文件描述符
     int maxfd;   /* highest file descriptor currently registered */
+	// 可以追踪的最大文件描述符
     int setsize; /* max number of file descriptors tracked */
     long long timeEventNextId;
+	// 持有的IO事件
     aeFileEvent *events; /* Registered events */
+	// 需要触发的事件，
     aeFiredEvent *fired; /* Fired events */
     aeTimeEvent *timeEventHead;
     int stop;
+	// 轮询API特定数据(如：epoll的读/写等)
     void *apidata; /* This is used for polling API specific data */
+	
     aeBeforeSleepProc *beforesleep;
     aeBeforeSleepProc *aftersleep;
     int flags;

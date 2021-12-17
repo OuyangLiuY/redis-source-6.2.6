@@ -1,15 +1,102 @@
+## Redis 源码解析
 
-## 学习Redis的规划
+## 1、Redis 入口 ：
 
-### 第一阶段 熟悉Redis基础数据结构和内存分配
+​	1.redis启动入口，server.c中main方法：
+
+```
+
+```
+
+2. redis命令结构体：
+
+   ```c
+   // 定义类型为redisCommand得数组对象
+   struct redisCommand redisCommandTable[] = {
+       {"module",moduleCommand,-2,
+        "admin no-script",
+        0,NULL,0,0,0,0,0,0},
+   
+       {"get",getCommand,2,
+        "read-only fast @string",
+        0,NULL,1,1,1,0,0,0},
+       {....},
+        };
+   ```
+
+   ```c
+   // redis命令结构体
+   struct redisCommand {
+       char *name; 
+       redisCommandProc *proc;
+       int arity;
+       char *sflags;   /* Flags as string representation, one char per flag. */
+       uint64_t flags; /* The actual flags, obtained from the 'sflags' field. */
+       /* Use a function to determine keys arguments in a command line.
+        * Used for Redis Cluster redirect. */
+       redisGetKeysProc *getkeys_proc;
+       /* What keys should be loaded in background when calling this command? */
+       int firstkey; /* The first argument that's a key (0 = no keys) */
+       int lastkey;  /* The last argument that's a key */
+       int keystep;  /* The step between first and last key */
+       long long microseconds, calls, rejected_calls, failed_calls;
+       int id;     /* Command ID. This is a progressive ID starting from 0 that
+                      is assigned at runtime, and is used in order to check
+                      ACLs. A connection is able to execute a given command if
+                      the user associated to the connection has this command
+                      bit set in the bitmap of allowed commands. */
+   }
+   ```
+
+   
+
+## 2、redis 单线程实现原理
+
+1、redis IO模型：
+
+redis.conf 配置文件：
+
+```shell
+# 默认不开启，如果开启默认配置IO数是 4 个，最大不能超过128（看源码可知）
+# io-threads 是用多线程处理《写IO》主线程exec的结果
+io-threads 4
+# 默认不开始 do read多线程，《读》 IO
+io-threads-do-reads no
+# NOTE 1: This configuration directive cannot be changed at runtime via
+# CONFIG SET. Aso this feature currently does not work when SSL is
+# enabled.
+#
+# NOTE 2: If you want to test the Redis speedup using redis-benchmark, make
+# sure you also run the benchmark itself in o-threads-do-reads nothreaded mode, using the
+# --threads option to match the number of Redis threads, otherwise you'll not
+# be able to notice the improvements.
+# 最好使用redis-benchmark来测试redis速度，
+redis-benchmark --threads 4
+# <Usually threading reads doesn't help much.> (通常情况下开始多IO多线程并没有多大用，但是最好根据业务来)
+
+```
+
+
+
+## 3、redis 基础类型及内存管理
+
+### 第一阶段 熟悉Redis基础数据结构
 - 阅读Redis的数据结构部分，基本位于如下文件中：内存分配 zmalloc.c和zmalloc.h
+
 - 动态字符串 sds.h和sds.c
+
 - 双端链表 adlist.c和adlist.h
+
 - 字典 dict.h和dict.c
+
 - 跳跃表 server.h文件里面关于zskiplist结构和zskiplistNode结构，以及t_zset.c中所有zsl开头的函数，比如 zslCreate、zslInsert、zslDeleteNode等等。
+
 - 基数统计 hyperloglog.c 中的 hllhdr 结构， 以及所有以 hll 开头的函数
-第二阶段 熟悉Redis的内存编码结构
+
+###  第二阶段 熟悉Redis的内存编码结构
+
 - 整数集合数据结构 intset.h和intset.c
+
 - 压缩列表数据结构 ziplist.h和ziplist.c
 
 ### 第三阶段 熟悉Redis数据类型的实现
