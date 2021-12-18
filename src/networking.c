@@ -2153,16 +2153,19 @@ void processInputBuffer(client *c) {
     }
 }
 
+// redis 非常重要的方法之一
 void readQueryFromClient(connection *conn) {
-    client *c = connGetPrivateData(conn);
+    client *c = connGetPrivateData(conn); // 从链接中获取客户端
     int nread, readlen;
     size_t qblen;
 
     /* Check if we want to read from the client later when exiting from
      * the event loop. This is the case if threaded I/O is enabled. */
+     // 1. 有可读取的client 延迟客户端读取
     if (postponeClientRead(c)) return;
 
     /* Update total number of reads on server */
+    // 原子更新读总数
     atomicIncr(server.stat_total_reads_processed, 1);
 
     readlen = PROTO_IOBUF_LEN;
@@ -3452,6 +3455,7 @@ list *io_threads_list[IO_THREADS_MAX_NUM];
 
 static inline unsigned long getIOPendingCount(int i) {
     unsigned long count = 0;
+    // 原子去同步取 待处理的IO_Thread
     atomicGetWithSync(io_threads_pending[i], count);
     return count;
 }
@@ -3473,7 +3477,9 @@ void *IOThreadMain(void *myid) {
 
     while(1) {
         /* Wait for start */
+        // CPU 在空转？
         for (int j = 0; j < 1000000; j++) {
+            // 读取到IO待处理的事件，跳出当前
             if (getIOPendingCount(id) != 0) break;
         }
 
@@ -3497,6 +3503,7 @@ void *IOThreadMain(void *myid) {
             if (io_threads_op == IO_THREADS_OP_WRITE) {
                 writeToClient(c,0);
             } else if (io_threads_op == IO_THREADS_OP_READ) {
+                // 主要做了三件事：分配，IO读写， 命令执行
                 readQueryFromClient(c->conn);
             } else {
                 serverPanic("io_threads_op value is unknown");
@@ -3599,11 +3606,13 @@ int stopThreadedIOIfNeeded(void) {
 }
 
 int handleClientsWithPendingWritesUsingThreads(void) {
+    // 全局server中看一下是否有需要待写的处理
     int processed = listLength(server.clients_pending_write);
     if (processed == 0) return 0; /* Return ASAP if there are no clients. */
 
     /* If I/O threads are disabled or we have few clients to serve, don't
      * use I/O threads, but the boring synchronous code. */
+     // 处理的io只有一个，或者
     if (server.io_threads_num == 1 || stopThreadedIOIfNeeded()) {
         return handleClientsWithPendingWrites();
     }
@@ -3612,13 +3621,13 @@ int handleClientsWithPendingWritesUsingThreads(void) {
     if (!server.io_threads_active) startThreadedIO();
 
     /* Distribute the clients across N different lists. */
-    listIter li;
-    listNode *ln;
+    listIter li;  // list 的迭代器，用于遍历
+    listNode *ln; // 连biao节点指针
     listRewind(server.clients_pending_write,&li);
     int item_id = 0;
     while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        c->flags &= ~CLIENT_PENDING_WRITE;
+        client *c = listNodeValue(ln); // 拿到链表值，也就是客户端结构体
+        c->flags &= ~CLIENT_PENDING_WRITE; // 状态
 
         /* Remove clients from the list of pending writes since
          * they are going to be closed ASAP. */
@@ -3687,8 +3696,10 @@ int postponeClientRead(client *c) {
         server.io_threads_do_reads &&
         !ProcessingEventsWhileBlocked &&
         !(c->flags & (CLIENT_MASTER|CLIENT_SLAVE|CLIENT_PENDING_READ|CLIENT_BLOCKED))) 
-    {
+        // 线程状态：激活，读，非阻塞，
+    {   // 更改flags的状态为：客户端待定读取
         c->flags |= CLIENT_PENDING_READ;
+        // 将待定读取的 c 放入到server的可读取节点中
         listAddNodeHead(server.clients_pending_read,c);
         return 1;
     } else {

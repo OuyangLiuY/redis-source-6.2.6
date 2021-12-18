@@ -404,7 +404,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
         for (j = 0; j < numevents; j++) {
             aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
             int mask = eventLoop->fired[j].mask;
-            int fd = eventLoop->fired[j].fd;
+            int fd = eventLoop->fired[j].fd; //拿到需要触发的fd
             int fired = 0; /* Number of events fired for current fd. */
 
             /* Normally we execute the readable event first, and the writable
@@ -418,15 +418,18 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
              * This is useful when, for instance, we want to do things
              * in the beforeSleep() hook, like fsyncing a file to disk,
              * before replying to a client. */
+            // AE_BARRIER 壁垒状态，用来将文件同步到磁盘，在readable状态之后，不触发写事件，
             int invert = fe->mask & AE_BARRIER;
 
             /* Note the "fe->mask & mask & ..." code: maybe an already
              * processed event removed an element that fired and we still
              * didn't processed, so we check if the event is still valid.
              *
-             * Fire the readable event if the call sequence is not
-             * inverted. */
+             * Fire the readable event if the call sequence is not inverted.
+             *  
+             *  */
             if (!invert && fe->mask & mask & AE_READABLE) {
+                // 执行read IO 回调方法，在初始化的时候设置进去的accept_handle方法
                 fe->rfileProc(eventLoop,fd,fe->clientData,mask);
                 fired++;
                 fe = &eventLoop->events[fd]; /* Refresh in case of resize. */
