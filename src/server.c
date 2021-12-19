@@ -3059,10 +3059,10 @@ int listenToPort(int port, socketFds *sfd) {
         if (optional) addr++;
         if (strchr(addr,':')) {
             /* Bind IPv6 address. */
-            sfd->fd[sfd->count] = anetTcp6Server(server.neterr,port,addr,server.tcp_backlog);
+            sfd->fd[sfd->count] = anetTcp6Server(server.neterr,port,addr,server.tcp_backlog); //tcp ipv6
         } else {
             /* Bind IPv4 address. */
-            sfd->fd[sfd->count] = anetTcpServer(server.neterr,port,addr,server.tcp_backlog);
+            sfd->fd[sfd->count] = anetTcpServer(server.neterr,port,addr,server.tcp_backlog); // tcp ipv4
         }
         if (sfd->fd[sfd->count] == ANET_ERR) {
             int net_errno = errno;
@@ -3203,9 +3203,11 @@ void initServer(void) {
             strerror(errno));
         exit(1);
     }
+	// 分配redis数据库db内存
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Open the TCP listening socket for the user commands. */
+	// 监听端口号，默认6379
     if (server.port != 0 &&
         listenToPort(server.port,&server.ipfd) == C_ERR) { // 创建端口监听port，
         serverLog(LL_WARNING, "Failed listening on port %u (TCP), aborting.", server.port);
@@ -3312,11 +3314,12 @@ void initServer(void) {
 
     /* Create an event handler for accepting new connections in TCP and Unix
      * domain sockets. */
-     // 创建socketHandler用于 接受客户端请求
-    if (createSocketAcceptHandler(&server.ipfd, acceptTcpHandler) != C_OK) {
+     // 创建socketHandler用于 接受客户端请求，绑定处理
+    if (createSocketAcceptHandler(&server.ipfd, acceptTcpHandler) != C_OK) { // tcpIp fd
         serverPanic("Unrecoverable error creating TCP socket accept handler.");
     }
-    if (createSocketAcceptHandler(&server.tlsfd, acceptTLSHandler) != C_OK) {
+	
+    if (createSocketAcceptHandler(&server.tlsfd, acceptTLSHandler) != C_OK) { // tlsfd 
         serverPanic("Unrecoverable error creating TLS socket accept handler.");
     }
     if (server.sofd > 0 && aeCreateFileEvent(server.el,server.sofd,AE_READABLE,
@@ -3581,6 +3584,7 @@ struct redisCommand *lookupCommandOrOriginal(sds name) {
  * command execution, for example when serving a blocked client, you
  * want to use propagate().
  */
+ // 传播特定命令到AOF和Slaves中
 void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
                int flags)
 {
@@ -3600,9 +3604,9 @@ void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
     serverAssert(!(areClientsPaused() && !server.client_pause_in_transaction));
 
     if (server.aof_state != AOF_OFF && flags & PROPAGATE_AOF)
-        feedAppendOnlyFile(cmd,dbid,argv,argc);
+        feedAppendOnlyFile(cmd,dbid,argv,argc);		// 添加到AOF文件
     if (flags & PROPAGATE_REPL)
-        replicationFeedSlaves(server.slaves,dbid,argv,argc);
+        replicationFeedSlaves(server.slaves,dbid,argv,argc);	// 复制给从节点
 }
 
 /* Used inside commands to schedule the propagation of additional commands
@@ -3669,7 +3673,7 @@ void slowlogPushCurrentCommand(client *c, struct redisCommand *cmd, ustime_t dur
      * arguments. */
     robj **argv = c->original_argv ? c->original_argv : c->argv;
     int argc = c->original_argv ? c->original_argc : c->argc;
-    slowlogPushEntryIfNeeded(c,argv,argc,duration);
+    slowlogPushEntryIfNeeded(c,argv,argc,duration);		// push 慢日志entry到server.slowlog双向链表中
 }
 
 /* Call() is the core of Redis execution of a command.
@@ -3709,16 +3713,17 @@ void slowlogPushCurrentCommand(client *c, struct redisCommand *cmd, ustime_t dur
  * preventCommandReplication(client *c);
  *
  */
+ // redis 得核心调用方法
 void call(client *c, int flags) {
     long long dirty;
     monotime call_timer;
     int client_old_flags = c->flags;
-    struct redisCommand *real_cmd = c->cmd;
+    struct redisCommand *real_cmd = c->cmd;	// 拿到真正得redis命令
     static long long prev_err_count;
 
     /* Initialization: clear the flags that must be set by the command on
      * demand, and initialize the array for additional commands propagation. */
-    c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
+    c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);	
     redisOpArray prev_also_propagate = server.also_propagate;
     redisOpArrayInit(&server.also_propagate);
 
@@ -3735,9 +3740,9 @@ void call(client *c, int flags) {
     elapsedStart(&call_timer);
     // 执行
     c->cmd->proc(c);
-    const long duration = elapsedUs(call_timer);
-    c->duration = duration;
-    dirty = server.dirty-dirty;
+    const long duration = elapsedUs(call_timer);	// 获取命令执行得时间
+    c->duration = duration;							// 更新到client中
+    dirty = server.dirty-dirty;						// 看一下是否改变了DB位置，在proc之后
     if (dirty < 0) dirty = 0;
 
     /* Update failed command calls if required.
@@ -3777,16 +3782,16 @@ void call(client *c, int flags) {
     /* Record the latency this command induced on the main thread.
      * unless instructed by the caller not to log. (happens when processing
      * a MULTI-EXEC from inside an AOF). */
-    if (flags & CMD_CALL_SLOWLOG) {
+    if (flags & CMD_CALL_SLOWLOG) {			
         char *latency_event = (real_cmd->flags & CMD_FAST) ?
                                "fast-command" : "command";
-        latencyAddSampleIfNeeded(latency_event,duration/1000);
+        latencyAddSampleIfNeeded(latency_event,duration/1000);	//延迟记录，如果开启了延迟监控，并设置了阈值，当大于阈值时记录(latency_monitor_threshold)
     }
 
     /* Log the command into the Slow log if needed.
      * If the client is blocked we will handle slowlog when it is unblocked. */
     if ((flags & CMD_CALL_SLOWLOG) && !(c->flags & CLIENT_BLOCKED))
-        slowlogPushCurrentCommand(c, real_cmd, duration);
+        slowlogPushCurrentCommand(c, real_cmd, duration);	// 记录慢日志
 
     /* Send the command to clients in MONITOR mode if applicable.
      * Administrative commands are considered too dangerous to be shown. */
@@ -3884,7 +3889,7 @@ void call(client *c, int flags) {
                 execCommandPropagateExec(c->db->id);
             }
         }
-        redisOpArrayFree(&server.also_propagate);
+        redisOpArrayFree(&server.also_propagate);	// 额外得命令传播？
     }
     server.also_propagate = prev_also_propagate;
 
@@ -3912,7 +3917,7 @@ void call(client *c, int flags) {
 
     /* Record peak memory after each command and before the eviction that runs
      * before the next command. */
-    size_t zmalloc_used = zmalloc_used_memory();
+    size_t zmalloc_used = zmalloc_used_memory();	// 记录每个命令之后和下一个命令之前运行的收回之前的峰值内存。
     if (zmalloc_used > server.stat_peak_memory)
         server.stat_peak_memory = zmalloc_used;
 }
@@ -4022,7 +4027,7 @@ int processCommand(client *c) {
     int is_may_replicate_command = (c->cmd->flags & (CMD_WRITE | CMD_MAY_REPLICATE)) ||
                                    (c->cmd->proc == execCommand && (c->mstate.cmd_flags & (CMD_WRITE | CMD_MAY_REPLICATE)));
 
-    if (authRequired(c)) {
+    if (authRequired(c)) {	// 检查权限
         /* AUTH and HELLO and no auth commands are valid even in
          * non-authenticated state. */
         if (!(c->cmd->flags & CMD_NO_AUTH)) {
@@ -4159,6 +4164,7 @@ int processCommand(client *c) {
 
     /* Don't accept write commands if this is a read only slave. But
      * accept write commands if this is our master. */
+     // 检查一下当前redis实例，是否具有写得权限
     if (server.masterhost && server.repl_slave_ro &&
         !(c->flags & CLIENT_MASTER) &&
         is_write_command)
@@ -4169,6 +4175,7 @@ int processCommand(client *c) {
 
     /* Only allow a subset of commands in the context of Pub/Sub if the
      * connection is in RESP2 mode. With RESP3 there are no limits. */
+    
     if ((c->flags & CLIENT_PUBSUB && c->resp == 2) &&
         c->cmd->proc != pingCommand &&
         c->cmd->proc != subscribeCommand &&
@@ -4252,14 +4259,14 @@ int processCommand(client *c) {
         c->cmd->proc != multiCommand && c->cmd->proc != watchCommand &&
         c->cmd->proc != resetCommand)
     {
-        queueMultiCommand(c);
+        queueMultiCommand(c);	// 批量命令添加到队列中
         addReply(c,shared.queued);
     } else {
-        // 这里才是真正的命令执行
+        // redis 执行命令核心函数
         call(c,CMD_CALL_FULL);
         c->woff = server.master_repl_offset;
         if (listLength(server.ready_keys))
-            handleClientsBlockedOnKeys();
+            handleClientsBlockedOnKeys();	// 处理客户端被阻塞得keys，释放ready_keys
     }
 
     return C_OK;
@@ -6246,7 +6253,7 @@ int main(int argc, char **argv) {
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
     moduleInitModulesSystem();
-
+	
 	tlsInit();
 
     /* Store the executable path and arguments in a safe place in order

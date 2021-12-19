@@ -417,9 +417,9 @@ static connection *createTLSConnection(int client_side) {
     SSL_CTX *ctx = redis_tls_ctx;
     if (client_side && redis_tls_client_ctx)
         ctx = redis_tls_client_ctx;
-    tls_connection *conn = zcalloc(sizeof(tls_connection));
-    conn->c.type = &CT_TLS;
-    conn->c.fd = -1;
+    tls_connection *conn = zcalloc(sizeof(tls_connection)); //分配connection内存
+    conn->c.type = &CT_TLS; //conn中所有属性初始化，包括状态，回调函数等
+    conn->c.fd = -1; 
     conn->ssl = SSL_new(ctx);
     return (connection *) conn;
 }
@@ -446,7 +446,7 @@ static void updateTLSError(tls_connection *conn) {
  * is not in an error state.
  */
 connection *connCreateAcceptedTLS(int fd, int require_auth) {
-    tls_connection *conn = (tls_connection *) createTLSConnection(0);
+    tls_connection *conn = (tls_connection *) createTLSConnection(0); //创建 connection对象
     conn->c.fd = fd;
     conn->c.state = CONN_STATE_ACCEPTING;
 
@@ -928,9 +928,9 @@ ConnectionType CT_TLS = {
     .blocking_connect = connTLSBlockingConnect,
     .read = connTLSRead,
     .write = connTLSWrite,
-    .close = connTLSClose,
-    .set_write_handler = connTLSSetWriteHandler,
-    .set_read_handler = connTLSSetReadHandler,
+    .close = connTLSClose, 
+    .set_write_handler = connTLSSetWriteHandler, // write处理函数
+    .set_read_handler = connTLSSetReadHandler, // read处理函数
     .get_last_error = connTLSGetLastError,
     .sync_write = connTLSSyncWrite,
     .sync_read = connTLSSyncRead,

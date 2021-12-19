@@ -187,7 +187,7 @@ void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)
     if (mask & AE_WRITABLE) mask |= AE_BARRIER;
 
     aeApiDelEvent(eventLoop, fd, mask);
-    fe->mask = fe->mask & (~mask);
+    fe->mask = fe->mask & (~mask); // 重置mask为0
     if (fd == eventLoop->maxfd && fe->mask == AE_NONE) {
         /* Update the max fd */
         int j;

@@ -92,6 +92,7 @@ unsigned long aofRewriteBufferSize(void) {
 /* Event handler used to send data to the child process doing the AOF
  * rewrite. We send pieces of our AOF differences buffer so that the final
  * write when the child finishes the rewrite will be small. */
+ // 写入AOF文件数据得事件函数
 void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
     listNode *ln;
     aofrwblock *block;
@@ -102,22 +103,23 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(mask);
 
     while(1) {
-        ln = listFirst(server.aof_rewrite_buf_blocks);
+        ln = listFirst(server.aof_rewrite_buf_blocks); // 从这个重写得块中，获取到第一个值
         block = ln ? ln->value : NULL;
-        if (server.aof_stop_sending_diff || !block) {
+        if (server.aof_stop_sending_diff || !block) {	// aof停止发送状态，或者block不存在，那么就返回
             aeDeleteFileEvent(server.el,server.aof_pipe_write_data_to_child,
                               AE_WRITABLE);
             return;
         }
-        if (block->used > 0) {
-            nwritten = write(server.aof_pipe_write_data_to_child,
-                             block->buf,block->used);
+        if (block->used > 0) {	// 说明有需要写入到AOF文件得数据
+            nwritten = write(server.aof_pipe_write_data_to_child,	
+                             block->buf,block->used);	// C write函数
             if (nwritten <= 0) return;
-            memmove(block->buf,block->buf+nwritten,block->used-nwritten);
+            memmove(block->buf,block->buf+nwritten,block->used-nwritten);	// 改变下文件已经写入得指针位置
+			// 重置一下block中得used和free得值
             block->used -= nwritten;
             block->free += nwritten;
         }
-        if (block->used == 0) listDelNode(server.aof_rewrite_buf_blocks,ln);
+        if (block->used == 0) listDelNode(server.aof_rewrite_buf_blocks,ln);	// block中used数据写完，那么删除节点ln
     }
 }
 
@@ -164,7 +166,8 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
      * not one already. */
     if (!server.aof_stop_sending_diff &&
         aeGetFileEvents(server.el,server.aof_pipe_write_data_to_child) == 0)
-    {
+		{
+		// 创建AOF写入事件，让子线程去异步写入到AOF文件
         aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child,
             AE_WRITABLE, aofChildWriteDiffData, NULL);
     }
@@ -610,6 +613,7 @@ sds catAppendOnlyExpireAtCommand(sds buf, struct redisCommand *cmd, robj *key, r
     return buf;
 }
 
+// 仅仅开启了AOF文件
 void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
     sds buf = sdsempty();
     /* The DB this command was targeting is not the same as the last command

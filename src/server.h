@@ -292,8 +292,8 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define BLOCKED_NUM 7     /* Number of blocked states. */
 
 /* Client request types */
-#define PROTO_REQ_INLINE 1
-#define PROTO_REQ_MULTIBULK 2
+#define PROTO_REQ_INLINE 1		// 客户端单个请求
+#define PROTO_REQ_MULTIBULK 2	// 客户端批量请求
 
 /* Client classes for client limits, currently used only for
  * the max-client-output-buffer limit implementation. */

@@ -117,31 +117,33 @@ int authRequired(client *c) {
 }
 
 client *createClient(connection *conn) {
-    client *c = zmalloc(sizeof(client));
+    client *c = zmalloc(sizeof(client)); // 分配空间
 
     /* passing NULL as conn it is possible to create a non connected client.
      * This is useful since all the commands needs to be executed
      * in the context of a client. When commands are executed in other
      * contexts (for instance a Lua script) we need a non connected client. */
-    if (conn) {
+    if (conn) { // conn存在
         connNonBlock(conn);
-        connEnableTcpNoDelay(conn);
+        connEnableTcpNoDelay(conn); //设置 tcp socket noDelay 模式
         if (server.tcpkeepalive)
             connKeepAlive(conn,server.tcpkeepalive);
-        connSetReadHandler(conn, readQueryFromClient);
-        connSetPrivateData(conn, c);
+		// **设置client回调函数，真正处理客户端接收到数据**//
+        connSetReadHandler(conn, readQueryFromClient); // 设置conn中read回调函数，也就是readQueryFromClient函数
+        connSetPrivateData(conn, c); // 绑定client指针到conn中
     }
 
-    selectDb(c,0);
+    selectDb(c,0); 	// 默认第一个Db
     uint64_t client_id;
     atomicGetIncr(server.next_client_id, client_id, 1);
+	// 初始化client属性
     c->id = client_id;
     c->resp = 2;
     c->conn = conn;
     c->name = NULL;
     c->bufpos = 0;
     c->qb_pos = 0;
-    c->querybuf = sdsempty();
+    c->querybuf = sdsempty(); //设置空字符
     c->pending_querybuf = sdsempty();
     c->querybuf_peak = 0;
     c->reqtype = 0;
@@ -156,7 +158,7 @@ client *createClient(connection *conn) {
     c->sentlen = 0;
     c->flags = 0;
     c->ctime = c->lastinteraction = server.unixtime;
-    clientSetDefaultAuth(c);
+    clientSetDefaultAuth(c);	// 默认auth
     c->replstate = REPL_STATE_NONE;
     c->repl_put_online_on_ack = 0;
     c->reploff = 0;
@@ -170,11 +172,11 @@ client *createClient(connection *conn) {
     c->reply = listCreate();
     c->reply_bytes = 0;
     c->obuf_soft_limit_reached_time = 0;
-    listSetFreeMethod(c->reply,freeClientReplyValue);
-    listSetDupMethod(c->reply,dupClientReplyValue);
+    listSetFreeMethod(c->reply,freeClientReplyValue); 	// 设置list链表节点释放内存函数
+    listSetDupMethod(c->reply,dupClientReplyValue); 	// 设置list链表节点数据拷贝函数
     c->btype = BLOCKED_NONE;
     c->bpop.timeout = 0;
-    c->bpop.keys = dictCreate(&objectKeyHeapPointerValueDictType,NULL);
+    c->bpop.keys = dictCreate(&objectKeyHeapPointerValueDictType,NULL); // 字典类型创建
     c->bpop.target = NULL;
     c->bpop.xread_group = NULL;
     c->bpop.xread_consumer = NULL;
@@ -196,9 +198,9 @@ client *createClient(connection *conn) {
     c->auth_callback = NULL;
     c->auth_callback_privdata = NULL;
     c->auth_module = NULL;
-    listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
-    listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
-    if (conn) linkClient(c);
+    listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);	 
+    listSetMatchMethod(c->pubsub_patterns,listMatchObjects); // 比较对象函数
+    if (conn) linkClient(c); // 将client添加到server得clients链表末尾节点上
     initClientMultiState(c);
     return c;
 }
@@ -352,6 +354,7 @@ void _addReplyProtoToList(client *c, const char *s, size_t len) {
  * -------------------------------------------------------------------------- */
 
 /* Add the object 'obj' string representation to the client output buffer. */
+// 添加 obj 到 client得output buffer中
 void addReply(client *c, robj *obj) {
     if (prepareClientToWrite(c) != C_OK) return;
 
@@ -994,7 +997,7 @@ void clientAcceptHandler(connection *conn) {
         serverLog(LL_WARNING,
                 "Error accepting a client connection: %s",
                 connGetLastError(conn));
-        freeClientAsync(c);
+        freeClientAsync(c); // 异步释放client数据，
         return;
     }
 
@@ -1089,7 +1092,7 @@ static void acceptCommonHandler(connection *conn, int flags, char *ip) {
     }
 
     /* Create connection and client */
-    if ((c = createClient(conn)) == NULL) {
+    if ((c = createClient(conn)) == NULL) { // 创建客户端client
         serverLog(LL_WARNING,
             "Error registering fd event for the new client: %s (conn: %s)",
             connGetLastError(conn),
@@ -1128,8 +1131,9 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(privdata);
 
     while(max--) {
+		// 接收到客户端请求fd
         cfd = anetTcpAccept(server.neterr, fd, cip, sizeof(cip), &cport);
-        if (cfd == ANET_ERR) {
+        if (cfd == ANET_ERR) { // 有异常发生，直接返回
             if (errno != EWOULDBLOCK)
                 serverLog(LL_WARNING,
                     "Accepting client connection: %s", server.neterr);
@@ -1653,10 +1657,11 @@ int handleClientsWithPendingWrites(void) {
 }
 
 /* resetClient prepare the client to process the next command */
-void resetClient(client *c) {
-    redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
+// 重置客户端，以便于执行下一个命令
+void resetClient(client *c) {				
+    redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;	// cmd 存在，执行proc，否则置空
 
-    freeClientArgv(c);
+    freeClientArgv(c);	// 释放客户端命令参数
     c->reqtype = 0;
     c->multibulklen = 0;
     c->bulklen = -1;
@@ -2037,7 +2042,7 @@ int processCommandAndResetClient(client *c) {
     client *old_client = server.current_client;
     server.current_client = c;
     if (processCommand(c) == C_OK) {
-        commandProcessed(c);
+        commandProcessed(c);	// 命令执行成功，重置客户端
     }
     if (server.current_client == NULL) deadclient = 1;
     /*
@@ -2104,8 +2109,8 @@ void processInputBuffer(client *c) {
             }
         }
 
-        if (c->reqtype == PROTO_REQ_INLINE) {
-            if (processInlineBuffer(c) != C_OK) break;
+        if (c->reqtype == PROTO_REQ_INLINE) { // 客户端请求是单个命令，
+            if (processInlineBuffer(c) != C_OK) break; 	// 那么尝试去执行
             /* If the Gopher mode and we got zero or one argument, process
              * the request in Gopher mode. To avoid data race, Redis won't
              * support Gopher if enable io threads to read queries. */
@@ -2113,12 +2118,12 @@ void processInputBuffer(client *c) {
                 ((c->argc == 1 && ((char*)(c->argv[0]->ptr))[0] == '/') ||
                   c->argc == 0))
             {
-                processGopherRequest(c);
+                processGopherRequest(c);	// 处理Gopher协议，现基本不用
                 resetClient(c);
                 c->flags |= CLIENT_CLOSE_AFTER_REPLY;
                 break;
             }
-        } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
+        } else if (c->reqtype == PROTO_REQ_MULTIBULK) {		// 执行批量处理
             if (processMultibulkBuffer(c) != C_OK) break;
         } else {
             serverPanic("Unknown request type");
@@ -2137,7 +2142,7 @@ void processInputBuffer(client *c) {
             }
 
             /* We are finally ready to execute the command. */
-            if (processCommandAndResetClient(c) == C_ERR) {
+            if (processCommandAndResetClient(c) == C_ERR) {		// 最终执行命令
                 /* If the client is no longer valid, we avoid exiting this
                  * loop and trimming the client buffer later. So we return
                  * ASAP in that case. */
@@ -2161,7 +2166,8 @@ void readQueryFromClient(connection *conn) {
 
     /* Check if we want to read from the client later when exiting from
      * the event loop. This is the case if threaded I/O is enabled. */
-     // 1. 有可读取的client 延迟客户端读取
+     // 1.有可读取的client 延迟客户端读取
+     // 如果有待定read事件，将其放到list中，改变flag状态，等待下次调用得时候去执行读操作
     if (postponeClientRead(c)) return;
 
     /* Update total number of reads on server */
@@ -2176,7 +2182,7 @@ void readQueryFromClient(connection *conn) {
      * processMultiBulkBuffer() can avoid copying buffers to create the
      * Redis Object representing the argument. */
     if (c->reqtype == PROTO_REQ_MULTIBULK && c->multibulklen && c->bulklen != -1
-        && c->bulklen >= PROTO_MBULK_BIG_ARG)
+        && c->bulklen >= PROTO_MBULK_BIG_ARG)	// 批量请求
     {
         ssize_t remaining = (size_t)(c->bulklen+2)-sdslen(c->querybuf);
 
@@ -2185,10 +2191,10 @@ void readQueryFromClient(connection *conn) {
         if (remaining > 0 && remaining < readlen) readlen = remaining;
     }
 
-    qblen = sdslen(c->querybuf);
+    qblen = sdslen(c->querybuf);	// 拿到请求buf中数据长度
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
-    nread = connRead(c->conn, c->querybuf+qblen, readlen);
+    nread = connRead(c->conn, c->querybuf+qblen, readlen);	// 拿到客户端read到得长度
     if (nread == -1) {
         if (connGetState(conn) == CONN_STATE_CONNECTED) {
             return;
@@ -2205,6 +2211,7 @@ void readQueryFromClient(connection *conn) {
         /* Append the query buffer to the pending (not applied) buffer
          * of the master. We'll use this buffer later in order to have a
          * copy of the string applied by the last command executed. */
+         // 将querybuf得数据添加到pendingBuffer后面，以便于顺序执行this buffer命令
         c->pending_querybuf = sdscatlen(c->pending_querybuf,
                                         c->querybuf+qblen,nread);
     }
@@ -2213,7 +2220,7 @@ void readQueryFromClient(connection *conn) {
     c->lastinteraction = server.unixtime;
     if (c->flags & CLIENT_MASTER) c->read_reploff += nread;
     atomicIncr(server.stat_net_input_bytes, nread);
-    if (sdslen(c->querybuf) > server.client_max_querybuf_len) {
+    if (sdslen(c->querybuf) > server.client_max_querybuf_len) { // querybuf得长度超过最大长度，报错，并释放内存
         sds ci = catClientInfoString(sdsempty(),c), bytes = sdsempty();
 
         bytes = sdscatrepr(bytes,c->querybuf,64);
@@ -2226,6 +2233,7 @@ void readQueryFromClient(connection *conn) {
 
     /* There is more data in the client input buffer, continue parsing it
      * in case to check if there is a full command to execute. */
+     // 继续解析client中是否有完整得命令可执行
      processInputBuffer(c);
 }
 

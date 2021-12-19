@@ -73,8 +73,8 @@ int anetSetBlock(char *err, int fd, int non_block) {
      * then there is no need to call fcntl to set/unset it again. */
     if (!!(flags & O_NONBLOCK) == !!non_block)
         return ANET_OK;
-
-    if (non_block)
+	
+    if (non_block) // 设置非阻塞状态
         flags |= O_NONBLOCK;
     else
         flags &= ~O_NONBLOCK;
@@ -123,7 +123,7 @@ int anetCloexec(int fd) {
 int anetKeepAlive(char *err, int fd, int interval)
 {
     int val = 1;
-
+	// 设置socket为保持连接状态
     if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) == -1)
     {
         anetSetError(err, "setsockopt SO_KEEPALIVE: %s", strerror(errno));
@@ -251,6 +251,7 @@ static int anetSetReuseAddr(char *err, int fd) {
     int yes = 1;
     /* Make sure connection-intensive things like the redis benchmark
      * will be able to close/open sockets a zillion of times */
+     // 获取或者设置与某个套接字关联的选项
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1) {
         anetSetError(err, "setsockopt SO_REUSEADDR: %s", strerror(errno));
         return ANET_ERR;
@@ -398,12 +399,13 @@ int anetUnixGenericConnect(char *err, const char *path, int flags)
 }
 
 static int anetListen(char *err, int s, struct sockaddr *sa, socklen_t len, int backlog) {
-    if (bind(s,sa,len) == -1) {
+	// 绑定套接字socket，s是socket地址
+	if (bind(s,sa,len) == -1) {
         anetSetError(err, "bind: %s", strerror(errno));
         close(s);
         return ANET_ERR;
     }
-
+	// 监听
     if (listen(s, backlog) == -1) {
         anetSetError(err, "listen: %s", strerror(errno));
         close(s);
@@ -421,6 +423,7 @@ static int anetV6Only(char *err, int s) {
     return ANET_OK;
 }
 
+// tcpIPV4和IPV6 共同调用得方法
 static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backlog)
 {
     int s = -1, rv;
@@ -442,6 +445,7 @@ static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backl
         return ANET_ERR;
     }
     for (p = servinfo; p != NULL; p = p->ai_next) {
+		// 创建套接字，C函数(int socket(int af, int type, int protocol);)
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
             continue;
 
@@ -494,6 +498,7 @@ int anetUnixServer(char *err, char *path, mode_t perm, int backlog)
 static int anetGenericAccept(char *err, int s, struct sockaddr *sa, socklen_t *len) {
     int fd;
     while(1) {
+		// 监听客户端发起的tcp连接请求，三次握手后连接建立成功
         fd = accept(s,sa,len);
         if (fd == -1) {
             if (errno == EINTR)

@@ -213,6 +213,7 @@ int canFeedReplicaReplBuffer(client *replica) {
  * the commands received by our clients in order to create the replication
  * stream. Instead if the instance is a slave and has sub-slaves attached,
  * we use replicationFeedSlavesFromMasterStream() */
+ // 复制到salve节点
 void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     listNode *ln;
     listIter li;
@@ -254,7 +255,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         if (server.repl_backlog) feedReplicationBacklogWithObject(selectcmd);
 
         /* Send it to slaves. */
-        listRewind(slaves,&li);
+        listRewind(slaves,&li);	//	添加
         while((ln = listNext(&li))) {
             client *slave = ln->value;
 

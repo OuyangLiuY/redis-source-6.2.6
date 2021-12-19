@@ -74,8 +74,10 @@ ConnectionType CT_Socket;
  * be embedded in different structs, not just client.
  */
 
+// tcp得conn封装
 connection *connCreateSocket() {
-    connection *conn = zcalloc(sizeof(connection));
+    connection *conn = zcalloc(sizeof(connection)); 
+	// 初始化默认属性
     conn->type = &CT_Socket;
     conn->fd = -1;
 
@@ -251,6 +253,7 @@ static const char *connSocketGetLastError(connection *conn) {
     return strerror(conn->last_errno);
 }
 
+// 拿到conn连接，处理里面绑定得（ConnectionCallbackFunc）回调函数
 static void connSocketEventHandler(struct aeEventLoop *el, int fd, void *clientData, int mask)
 {
     UNUSED(el);
@@ -259,7 +262,7 @@ static void connSocketEventHandler(struct aeEventLoop *el, int fd, void *clientD
 
     if (conn->state == CONN_STATE_CONNECTING &&
             (mask & AE_WRITABLE) && conn->conn_handler) {
-
+		// 获取一下socket中得事件
         int conn_error = connGetSocketError(conn);
         if (conn_error) {
             conn->last_errno = conn_error;
@@ -267,11 +270,11 @@ static void connSocketEventHandler(struct aeEventLoop *el, int fd, void *clientD
         } else {
             conn->state = CONN_STATE_CONNECTED;
         }
-
+		// write_handler 不存在，那么直接删除当前得 event
         if (!conn->write_handler) aeDeleteFileEvent(server.el,conn->fd,AE_WRITABLE);
-
+		// 调用事件
         if (!callHandler(conn, conn->conn_handler)) return;
-        conn->conn_handler = NULL;
+        conn->conn_handler = NULL; //置空
     }
 
     /* Normally we execute the readable event first, and the writable
@@ -295,12 +298,12 @@ static void connSocketEventHandler(struct aeEventLoop *el, int fd, void *clientD
         if (!callHandler(conn, conn->read_handler)) return;
     }
     /* Fire the writable event. */
-    if (call_write) {
+    if (call_write) { // 写事件
         if (!callHandler(conn, conn->write_handler)) return;
     }
     /* If we have to invert the call, fire the readable event now
      * after the writable one. */
-    if (invert && call_read) {
+    if (invert && call_read) { // read事件
         if (!callHandler(conn, conn->read_handler)) return;
     }
 }
@@ -346,20 +349,20 @@ static int connSocketGetType(connection *conn) {
 }
 
 ConnectionType CT_Socket = {
-    .ae_handler = connSocketEventHandler,
-    .close = connSocketClose,
-    .write = connSocketWrite,
-    .read = connSocketRead,
-    .accept = connSocketAccept,
-    .connect = connSocketConnect,
-    .set_write_handler = connSocketSetWriteHandler,
-    .set_read_handler = connSocketSetReadHandler,
-    .get_last_error = connSocketGetLastError,
-    .blocking_connect = connSocketBlockingConnect,
-    .sync_write = connSocketSyncWrite,
-    .sync_read = connSocketSyncRead,
-    .sync_readline = connSocketSyncReadLine,
-    .get_type = connSocketGetType
+    .ae_handler = connSocketEventHandler,			// 处理conn中得回调函数
+    .close = connSocketClose,						// 绑定关闭函数
+    .write = connSocketWrite,						// 绑定写函数
+    .read = connSocketRead, 						// 绑定读函数
+    .accept = connSocketAccept,						// accept回调函数
+    .connect = connSocketConnect,					// 获取conn函数
+    .set_write_handler = connSocketSetWriteHandler,	// 设置写函数
+    .set_read_handler = connSocketSetReadHandler,	// 设置读回调函数
+    .get_last_error = connSocketGetLastError,		// 异常数据
+    .blocking_connect = connSocketBlockingConnect,	// 阻塞等待连接
+    .sync_write = connSocketSyncWrite,				// 同步写
+    .sync_read = connSocketSyncRead,				// 同步等待read
+    .sync_readline = connSocketSyncReadLine,		// 同步等待readline
+    .get_type = connSocketGetType					// 获取socket(CONN_TYPE_SOCKET)类型
 };
 
 

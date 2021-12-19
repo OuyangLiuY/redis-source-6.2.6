@@ -107,6 +107,7 @@ ssize_t syncRead(int fd, char *ptr, ssize_t size, long long timeout) {
         if (size == 0) return totread;
 
         /* Wait */
+		// 默认超时10毫秒，直到有读/写事件获取到，否则就抛出异常
         aeWait(fd,AE_READABLE,wait);
         elapsed = mstime() - start;
         if (elapsed >= timeout) {
