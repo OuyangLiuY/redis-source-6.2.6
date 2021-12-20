@@ -645,6 +645,7 @@ loaderr:
  * Both filename and options can be NULL, in such a case are considered
  * empty. This way loadServerConfig can be used to just load a file or
  * just load a string. */
+ // 加载配置(redis.conf)
 void loadServerConfig(char *filename, char config_from_stdin, char *options) {
     sds config = sdsempty();
     char buf[CONFIG_MAX_LINE+1];
@@ -652,15 +653,15 @@ void loadServerConfig(char *filename, char config_from_stdin, char *options) {
 
     /* Load the file content */
     if (filename) {
-        if ((fp = fopen(filename,"r")) == NULL) {
+        if ((fp = fopen(filename,"r")) == NULL) {		// 拿到文件fd
             serverLog(LL_WARNING,
                     "Fatal error, can't open config file '%s': %s",
                     filename, strerror(errno));
             exit(1);
         }
-        while(fgets(buf,CONFIG_MAX_LINE+1,fp) != NULL)
-            config = sdscat(config,buf);
-        fclose(fp);
+        while(fgets(buf,CONFIG_MAX_LINE+1,fp) != NULL)	// 读取fp到buf缓冲区
+            config = sdscat(config,buf);				// 将buf字符拷贝到sds中
+        fclose(fp);										// 关闭文件流
     }
     /* Append content from stdin */
     if (config_from_stdin) {

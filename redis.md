@@ -4,51 +4,81 @@
 
 ​	1.redis启动入口，server.c中main方法：
 
+```C
+int main(){
+    // 1.初始化server的配置，加载redis.conf配置
+    initServerConfig();
+    // 2.初始化ACL用户权限
+    ACLInit(); 
+    // 3.初始化server，建立socket连接，绑定回调函数等
+    initServer();
+    // 4.初始化线程，创建后台线程和IO线程
+    InitServerLast();
+    // 5.调用mian线程
+    aeMain(server.el);
+    return 1;
+}
 ```
 
+2. ae.c 中aeMain()函数：
+
+```C
+// 主线程一直进行循环，处理事件
+void aeMain(aeEventLoop *eventLoop) {
+    eventLoop->stop = 0; // 设置停止状态
+    while (!eventLoop->stop) { 
+        aeProcessEvents(eventLoop, AE_ALL_EVENTS | AE_CALL_BEFORE_SLEEP | AE_CALL_AFTER_SLEEP);
+    }
+}
 ```
 
-2. redis命令结构体：
+3. aeProcessEvents()函数:
 
-   ```c
-   // 定义类型为redisCommand得数组对象
-   struct redisCommand redisCommandTable[] = {
-       {"module",moduleCommand,-2,
-        "admin no-script",
-        0,NULL,0,0,0,0,0,0},
-   
-       {"get",getCommand,2,
-        "read-only fast @string",
-        0,NULL,1,1,1,0,0,0},
-       {....},
-        };
-   ```
+```C
+int aeProcessEvents(aeEventLoop *eventLoop, int flags){
+	// 执行beforeSleep
+    eventLoop->beforesleep(eventLoop);
+    // 获取 epoll中，epoll_wait的事件
+	int numevents = aeApiPoll(eventLoop, tvp);
+     // 执行aftersleep
+    eventLoop->aftersleep(eventLoop);
+     for (j = 0; j < numevents; j++) {
+         // 执行读事件
+         // 执行写事件
+     }
+    // 触发timeEvents事件
+    processTimeEvents(eventLoop);
+}
+```
 
-   ```c
-   // redis命令结构体
-   struct redisCommand {
-       char *name; 
-       redisCommandProc *proc;
-       int arity;
-       char *sflags;   /* Flags as string representation, one char per flag. */
-       uint64_t flags; /* The actual flags, obtained from the 'sflags' field. */
-       /* Use a function to determine keys arguments in a command line.
-        * Used for Redis Cluster redirect. */
-       redisGetKeysProc *getkeys_proc;
-       /* What keys should be loaded in background when calling this command? */
-       int firstkey; /* The first argument that's a key (0 = no keys) */
-       int lastkey;  /* The last argument that's a key */
-       int keystep;  /* The step between first and last key */
-       long long microseconds, calls, rejected_calls, failed_calls;
-       int id;     /* Command ID. This is a progressive ID starting from 0 that
-                      is assigned at runtime, and is used in order to check
-                      ACLs. A connection is able to execute a given command if
-                      the user associated to the connection has this command
-                      bit set in the bitmap of allowed commands. */
-   }
-   ```
+beforesleep函数在main函数主进行设置
 
-   
+4. beforesleep函数：
+
+主要有两个函数：
+
+1.handleClientsWithPendingReadsUsingThreads()；
+
+2.handleClientsWithPendingWritesUsingThreads() ;
+
+```C
+void beforeSleep(struct aeEventLoop *eventLoop) {
+	
+    /* We should handle pending reads clients ASAP after event loop. */
+    handleClientsWithPendingReadsUsingThreads();	// 1.事件循环中处理读clients待读事件
+
+    /* Handle writes with pending output buffers. */
+    handleClientsWithPendingWritesUsingThreads();	// 2.事件循环中处理写回到socket事件
+}
+```
+
+handleClientsWithPendingReadsUsingThreads：
+
+使用IO线程处理读事件:如果开启读多线程的话，默认是不开启的，如果有待读的事件，那么绑定到IOthread中，拿到IO thread线程的第一个线程，也就是main线程，执行命令，并绑定写handler。
+
+handleClientsWithPendingWritesUsingThreads：
+
+拿到待处理的write列表，跟io_threads进行绑定，改变状态，以便于其他IO线程可以执行绑定的write操作，主线程直接执行writeToClient(c,0);函数，将结果写回到客户端socket中。如果有IO线程，那么等待其他IO线程写回结束。
 
 ## 2、redis 单线程实现原理
 
@@ -76,7 +106,13 @@ redis-benchmark --threads 4
 
 ```
 
+2. redis 单线程执行原理图：
 
+   第一次轮询：接收到客户端穿过来的数据，根据绑定的read事件，将client添加到pending_read列表中
+
+   
+
+![](./images/redis单线程执行原理.jpg)
 
 ## 3、redis 基础类型及内存管理
 

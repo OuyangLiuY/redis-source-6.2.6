@@ -429,7 +429,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
              *  
              *  */
             if (!invert && fe->mask & mask & AE_READABLE) {
-                // 执行read IO 回调方法，在初始化的时候设置进去的accept_handle方法
+                // 执行read IO 回调方法，在初始化的时候设置进去的函数(readQueryFromClient)
                 fe->rfileProc(eventLoop,fd,fe->clientData,mask);
                 fired++;
                 fe = &eventLoop->events[fd]; /* Refresh in case of resize. */

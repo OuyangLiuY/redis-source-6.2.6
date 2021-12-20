@@ -73,8 +73,8 @@ typedef void aeBeforeSleepProc(struct aeEventLoop *eventLoop);
 typedef struct aeFileEvent {
     // READABLE|WRITABLE|BARRIER 三个事件中的其中一个
     int mask; /* one of AE_(READABLE|WRITABLE|BARRIER) */ 
-    aeFileProc *rfileProc;  //代表了，写事件的回调
-    aeFileProc *wfileProc; //代表了，读事件的回调
+    aeFileProc *rfileProc;  //代表了，读事件的回调
+    aeFileProc *wfileProc; //代表了，写事件的回调
     void *clientData;
 } aeFileEvent;
 

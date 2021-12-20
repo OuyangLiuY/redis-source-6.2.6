@@ -2440,7 +2440,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
         flushAppendOnlyFile(0);
 
     /* Handle writes with pending output buffers. */
-    handleClientsWithPendingWritesUsingThreads();
+    handleClientsWithPendingWritesUsingThreads();	// 处理写事件
 
     /* Close clients that need to be closed asynchronous */
     freeClientsInAsyncFreeQueue();
@@ -3314,7 +3314,7 @@ void initServer(void) {
 
     /* Create an event handler for accepting new connections in TCP and Unix
      * domain sockets. */
-     // 创建socketHandler用于 接受客户端请求，绑定处理
+     // 创建socketHandler用于 接受客户端请求，绑定处理   ****
     if (createSocketAcceptHandler(&server.ipfd, acceptTcpHandler) != C_OK) { // tcpIp fd
         serverPanic("Unrecoverable error creating TCP socket accept handler.");
     }
@@ -3338,7 +3338,7 @@ void initServer(void) {
 
     /* Register before and after sleep handlers (note this needs to be done
      * before loading persistence since it is used by processEventsWhileBlocked. */
-    // eventLoop绑定睡前，睡后的操作
+    // eventLoop绑定睡前，睡后的操作函数
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeSetAfterSleepProc(server.el,afterSleep);
 
@@ -3383,6 +3383,7 @@ void initServer(void) {
  * Thread Local Storage initialization collides with dlopen call.
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
 void InitServerLast() {
+	// 初始化后台系统，生成后台线程
     bioInit();
 	// 初始化IO线程，用于处理IO的读/写
     initThreadedIO();
@@ -6358,7 +6359,7 @@ int main(int argc, char **argv) {
     }
 
     readOOMScoreAdj();
-	// 初始化服务
+	// 初始化server
     initServer();
     if (background || server.pidfile) createPidFile();
     if (server.set_proc_title) redisSetProcTitle(NULL);

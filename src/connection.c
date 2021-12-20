@@ -95,9 +95,9 @@ connection *connCreateSocket() {
  * but could but possible with other protocols).
  */
 connection *connCreateAcceptedSocket(int fd) {
-    connection *conn = connCreateSocket();
+    connection *conn = connCreateSocket();				// 创建 connection
     conn->fd = fd;
-    conn->state = CONN_STATE_ACCEPTING;
+    conn->state = CONN_STATE_ACCEPTING;					// 设置其状态
     return conn;
 }
 
