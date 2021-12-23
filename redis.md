@@ -114,6 +114,142 @@ redis-benchmark --threads 4
 
 ![](./images/redis单线程执行原理.jpg)
 
+## 3、redis数据如何在内存存储方式
+
+1、initServer函数中，给server.db创建根据server.dbnum的数量
+
+```C
+// 分配redis数据库db内存
+server.db = zmalloc(sizeof(redisDb)*server.dbnum);
+```
+
+2、相关结构体：
+
+redisDb 结构体：
+
+```C
+typedef struct redisDb {
+	// redis 正真的key-value存储
+    dict *dict;                 /* The keyspace for this DB */
+	// 存储已经超时过期的(k-v)
+	dict *expires;              /* Timeout of keys with a timeout set */
+    dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
+	dict *ready_keys;           /* Blocked keys that received a PUSH */
+    dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
+    int id;                     /* Database ID */
+	// 平均ttl时间
+    long long avg_ttl;          /* Average TTL, just for stats */
+	// 用来拿到过期的k-v
+    unsigned long expires_cursor; /* Cursor of the active expire cycle. */
+    list *defrag_later;         /* List of key names to attempt to defrag one by one, gradually. */
+} redisDb;
+```
+
+dict结构体：
+
+```C
+typedef struct dict {
+    dictType *type;
+    void *privdata;
+    dictht ht[2];		// 默认2个hash表,[0]用来存储数据，[1]用来rehash
+    long rehashidx; /* rehashing not in progress if rehashidx == -1 */
+    int16_t pauserehash; /* If >0 rehashing is paused (<0 indicates coding error) */
+} dict;
+```
+dictType:
+```C
+/* Db->dict, keys are sds strings, vals are Redis objects. */
+dictType dbDictType = {
+    dictSdsHash,                /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCompare,          /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    dictObjectDestructor,       /* val destructor */
+    dictExpandAllowed           /* allow to expand */
+};
+```
+
+dictht结构体：
+
+hash表结构
+
+```C
+/* This is our hash table structure. Every dictionary has two of this as we
+ * implement incremental rehashing, for the old to the new table. */
+// 以上注释说明为什么默认要两个(dictht ht[2];)
+typedef struct dictht {
+    // k-v 存储地方，
+    dictEntry **table; 			// 哈希表数组
+    unsigned long size;			// 哈希表大小；在redis的实现中，size也是触发扩容的阈值
+    unsigned long sizemask;		// 哈希表大小掩码，用于计算索引值；总是等于 size-1
+    unsigned long used;			// 哈希表中保存的节点的数量
+} dictht;
+```
+
+dictEntry结构体：
+
+```C
+typedef struct dictEntry {
+    void *key;				// 键，是sds
+    union {
+        void *val;			// 值：redisObj
+        uint64_t u64;
+        int64_t s64;
+        double d;
+    } v;
+    struct dictEntry *next;
+} dictEntry;
+// 类似一个链表，该链表节点保存的是(key - val)
+```
+
+
+
+hash表负载因子计算公式：
+
+```C
+// 负载因子 = 哈希表已保存节点数量 / 哈希表大小
+load_factor = ht[0].used / ht[0].size
+```
+
+3.3、 Hash表执行扩容操作：
+
+触发条件：
+
+- 没有在执行 BGSAVE 命令或者 BGREWRITEAOF 命令， 并且哈希表的负载因子大于等于 1
+- 正在执行 BGSAVE 命令或者 BGREWRITEAOF 命令， 并且哈希表的负载因子大于等于 5
+
+redis扩容大小：
+
+在size >  4的情况下是size得2倍，否则就是4
+
+```C
+/* Our hash table capability is a power of two */
+static unsigned long _dictNextPower(unsigned long size)
+{
+    unsigned long i = DICT_HT_INITIAL_SIZE;
+
+    if (size >= LONG_MAX) return LONG_MAX + 1LU;
+    while(1) {
+        if (i >= size)
+            return i;
+        i *= 2;
+    }
+}
+```
+
+
+
+3.4、Hash表执行缩容操作：
+
+触发条件：
+
+-  当哈希表的负载因子小于 0.1 时， 程序自动开始对哈希表执行收缩操作。
+
+
+
+
+
 ## 3、redis 基础类型及内存管理
 
 ### 第一阶段 熟悉Redis基础数据结构

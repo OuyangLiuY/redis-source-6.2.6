@@ -58,14 +58,14 @@ static inline int sdsHdrSize(char type) {
 }
 
 static inline char sdsReqType(size_t string_size) {
-    if (string_size < 1<<5)
-        return SDS_TYPE_5;
-    if (string_size < 1<<8)
+    if (string_size < 1<<5)		// size < 32 
+        return SDS_TYPE_5;		// 使用 SDS_TYPE_5类型
+    if (string_size < 1<<8)		// size < 256
         return SDS_TYPE_8;
-    if (string_size < 1<<16)
+    if (string_size < 1<<16)	// size < 2^16 = 65535
         return SDS_TYPE_16;
 #if (LONG_MAX == LLONG_MAX)
-    if (string_size < 1ll<<32)
+    if (string_size < 1ll<<32)	
         return SDS_TYPE_32;
     return SDS_TYPE_64;
 #else
@@ -101,12 +101,13 @@ static inline size_t sdsTypeMaxSize(char type) {
  * end of the string. However the string is binary safe and can contain
  * \0 characters in the middle, as the length is stored in the sds header. */
 sds _sdsnewlen(const void *init, size_t initlen, int trymalloc) {
-    void *sh;
-    sds s;
-    char type = sdsReqType(initlen);
+    void *sh;							// 头指针
+    sds s;								// sds 可变字符串封装
+    char type = sdsReqType(initlen);	// 根据initLen确定char得类型
     /* Empty strings are usually created in order to append. Use type 8
      * since type 5 is not good at this. */
-    if (type == SDS_TYPE_5 && initlen == 0) type = SDS_TYPE_8;
+    // 默认初始化0长度得时候，使用得是256长度类型
+    if (type == SDS_TYPE_5 && initlen == 0) type = SDS_TYPE_8;	
     int hdrlen = sdsHdrSize(type);
     unsigned char *fp; /* flags pointer. */
     size_t usable;
@@ -114,19 +115,24 @@ sds _sdsnewlen(const void *init, size_t initlen, int trymalloc) {
     assert(initlen + hdrlen + 1 > initlen); /* Catch size_t overflow */
     sh = trymalloc?
         s_trymalloc_usable(hdrlen+initlen+1, &usable) :
-        s_malloc_usable(hdrlen+initlen+1, &usable);
+        s_malloc_usable(hdrlen+initlen+1, &usable);		// 开辟空间，并返回头指针
     if (sh == NULL) return NULL;
     if (init==SDS_NOINIT)
         init = NULL;
     else if (!init)
         memset(sh, 0, hdrlen+initlen+1);
-    s = (char*)sh+hdrlen;
-    fp = ((unsigned char*)s)-1;
+    s = (char*)sh+hdrlen;								// 头指针+hdrlen 就是sds得指针
+    fp = ((unsigned char*)s)-1;							// s指针-1，就是flag指针
     usable = usable-hdrlen-1;
     if (usable > sdsTypeMaxSize(type))
         usable = sdsTypeMaxSize(type);
     switch(type) {
         case SDS_TYPE_5: {
+			// type:0
+			// 如果initlen=31,
+			// 那么此时 *fp = 0 | (31<<3) = 1111 1000
+			// *fp 也就是当前flag指针得实际值，此类型下，只取前三位为flag，值是0~7
+			// 长度左移 3位，当去的时候再右移3位
             *fp = type | (initlen << SDS_TYPE_BITS);
             break;
         }
@@ -134,34 +140,34 @@ sds _sdsnewlen(const void *init, size_t initlen, int trymalloc) {
             SDS_HDR_VAR(8,s);
             sh->len = initlen;
             sh->alloc = usable;
-            *fp = type;
+            *fp = type;		// *fp = 1
             break;
         }
         case SDS_TYPE_16: {
             SDS_HDR_VAR(16,s);
             sh->len = initlen;
             sh->alloc = usable;
-            *fp = type;
+            *fp = type;		// *fp = 2
             break;
         }
         case SDS_TYPE_32: {
             SDS_HDR_VAR(32,s);
             sh->len = initlen;
             sh->alloc = usable;
-            *fp = type;
+            *fp = type;		// *fp = 3
             break;
         }
         case SDS_TYPE_64: {
             SDS_HDR_VAR(64,s);
             sh->len = initlen;
             sh->alloc = usable;
-            *fp = type;
+            *fp = type;		// *fp = 4
             break;
         }
     }
     if (initlen && init)
         memcpy(s, init, initlen);
-    s[initlen] = '\0';
+    s[initlen] = '\0';		// 最后一位补'\0',表示是结束位置
     return s;
 }
 

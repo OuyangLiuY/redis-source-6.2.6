@@ -3239,6 +3239,7 @@ void initServer(void) {
     }
 
     /* Create the Redis databases, and initialize other internal state. */
+	// 给redis数据库创建默认值
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&dbExpiresDictType,NULL);
