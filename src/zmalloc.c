@@ -247,8 +247,8 @@ void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable) {
 
 /* Reallocate memory and zero it or panic */
 void *zrealloc(void *ptr, size_t size) {
-    ptr = ztryrealloc_usable(ptr, size, NULL);
-    if (!ptr && size != 0) zmalloc_oom_handler(size);
+    ptr = ztryrealloc_usable(ptr, size, NULL);			// 分配内存
+    if (!ptr && size != 0) zmalloc_oom_handler(size);	// 分配内存失败，打印异常
     return ptr;
 }
 

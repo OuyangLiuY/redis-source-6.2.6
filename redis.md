@@ -116,14 +116,14 @@ redis-benchmark --threads 4
 
 ## 3、redis数据如何在内存存储方式
 
-1、initServer函数中，给server.db创建根据server.dbnum的数量
+### 3.1、initServer函数中，给server.db创建根据server.dbnum的数量
 
 ```C
 // 分配redis数据库db内存
 server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 ```
 
-2、相关结构体：
+### 3.2、相关结构体：
 
 redisDb 结构体：
 
@@ -212,7 +212,7 @@ hash表负载因子计算公式：
 load_factor = ht[0].used / ht[0].size
 ```
 
-3.3、 Hash表执行扩容操作：
+### 3.3、 Hash表执行扩容操作：
 
 触发条件：
 
@@ -240,7 +240,7 @@ static unsigned long _dictNextPower(unsigned long size)
 
 
 
-3.4、Hash表执行缩容操作：
+### 3.4、Hash表执行缩容操作：
 
 触发条件：
 
@@ -248,9 +248,53 @@ static unsigned long _dictNextPower(unsigned long size)
 
 
 
+## 4、redis 基础类型
+
+4.1、ziplist：压缩表
+
+zipList节点值entry：
+
+```C
+/* We use this function to receive information about a ziplist entry.
+ * Note that this is not how the data is actually encoded, is just what we
+ * get filled by a function in order to operate more easily. */
+typedef struct zlentry {
+    unsigned int prevrawlensize; /* Bytes used to encode the previous entry len*/
+    unsigned int prevrawlen;     /* Previous entry len. */
+    unsigned int lensize;        /* Bytes used to encode this entry type/len.
+                                    For example strings have a 1, 2 or 5 bytes
+                                    header. Integers always use a single byte.*/
+    unsigned int len;            /* Bytes used to represent the actual entry.
+                                    For strings this is just the string length
+                                    while for integers it is 1, 2, 3, 4, 8 or
+                                    0 (for 4 bit immediate) depending on the
+                                    number range. */
+    unsigned int headersize;     /* prevrawlensize + lensize. */
+    unsigned char encoding;      /* Set to ZIP_STR_* or ZIP_INT_* depending on
+                                    the entry encoding. However for 4 bits
+                                    immediate integers this can assume a range
+                                    of values and must be range-checked. */
+    unsigned char *p;            /* Pointer to the very start of the entry, that
+                                    is, this points to prev-entry-len field. */
+} zlentry;
+```
+
+创建空的zipList：
+
+```C
+/* Create a new empty ziplist. */
+unsigned char *ziplistNew(void) {
+    unsigned int bytes = ZIPLIST_HEADER_SIZE+ZIPLIST_END_SIZE;
+    unsigned char *zl = zmalloc(bytes);
+    ZIPLIST_BYTES(zl) = intrev32ifbe(bytes);
+    ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(ZIPLIST_HEADER_SIZE);
+    ZIPLIST_LENGTH(zl) = 0;
+    zl[bytes-1] = ZIP_END;
+    return zl;				// 返回的是ziplist的头指针
+}
+```
 
 
-## 3、redis 基础类型及内存管理
 
 ### 第一阶段 熟悉Redis基础数据结构
 - 阅读Redis的数据结构部分，基本位于如下文件中：内存分配 zmalloc.c和zmalloc.h

@@ -435,7 +435,7 @@ void trimStringObjectIfNeeded(robj *o) {
 }
 
 /* Try to encode a string object in order to save space */
-robj *tryObjectEncoding(robj *o) {
+robj *tryObjectEncoding(robj *o) {				// 尝试encode一个字符串以节省空间
     long value;
     sds s = o->ptr;
     size_t len;
@@ -490,7 +490,7 @@ robj *tryObjectEncoding(robj *o) {
      * try the EMBSTR encoding which is more efficient.
      * In this representation the object and the SDS string are allocated
      * in the same chunk of memory to save space and cache misses. */
-    if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT) {
+    if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT) {	// 当len小于44得时候，可以将其转成emb
         robj *emb;
 
         if (o->encoding == OBJ_ENCODING_EMBSTR) return o;

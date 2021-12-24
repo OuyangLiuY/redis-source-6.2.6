@@ -298,10 +298,10 @@ static void _dictRehashStep(dict *d) {
 // 增加元素到哈目标hash表中
 int dictAdd(dict *d, void *key, void *val)
 {
-    dictEntry *entry = dictAddRaw(d,key,NULL);		// 增加函数
+    dictEntry *entry = dictAddRaw(d,key,NULL);		// 将key值增加到哈希表中函数
 
     if (!entry) return DICT_ERR;
-    dictSetVal(d, entry, val);
+    dictSetVal(d, entry, val);						// 将val赋值给entry的val属性
     return DICT_OK;
 }
 
@@ -348,7 +348,7 @@ dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing)
     ht->used++;
 
     /* Set the hash entry fields. */
-    dictSetKey(d, entry, key);
+    dictSetKey(d, entry, key);			// 给entry属性赋值
     return entry;
 }
 

@@ -923,8 +923,9 @@ unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int
 }
 
 /* Insert item at "p". */
+// 在指针p后面添加数据
 unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen) {
-    size_t curlen = intrev32ifbe(ZIPLIST_BYTES(zl)), reqlen, newlen;
+    size_t curlen = intrev32ifbe(ZIPLIST_BYTES(zl)), reqlen, newlen;	// 计算出当前要插入的长度len
     unsigned int prevlensize, prevlen = 0;
     size_t offset;
     int nextdiff = 0;
@@ -935,7 +936,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     zlentry tail;
 
     /* Find out prevlen for the entry that is inserted. */
-    if (p[0] != ZIP_END) {
+    if (p[0] != ZIP_END) {			// 检查一下是否之前已经插入过数据
         ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);
     } else {
         unsigned char *ptail = ZIPLIST_ENTRY_TAIL(zl);

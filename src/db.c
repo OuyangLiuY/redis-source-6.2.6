@@ -191,8 +191,8 @@ robj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
  *
  * The program is aborted if the key already exists. */
 void dbAdd(redisDb *db, robj *key, robj *val) {
-    sds copy = sdsdup(key->ptr);
-    int retval = dictAdd(db->dict, copy, val);
+    sds copy = sdsdup(key->ptr);					// 从key的ptr转成sds字符串
+    int retval = dictAdd(db->dict, copy, val);		// 添加
 
     serverAssertWithInfo(NULL,key,retval == DICT_OK);
     signalKeyAsReady(db, key, val->type);
@@ -257,8 +257,8 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
  * The client 'c' argument may be set to NULL if the operation is performed
  * in a context where there is no clear client performing the operation. */
 void genericSetKey(client *c, redisDb *db, robj *key, robj *val, int keepttl, int signal) {
-    if (lookupKeyWrite(db,key) == NULL) {
-        dbAdd(db,key,val);
+    if (lookupKeyWrite(db,key) == NULL) {	// 看一下key是否已经存在了
+        dbAdd(db,key,val);					// 添加到哈希表中将key-value
     } else {
         dbOverwrite(db,key,val);
     }

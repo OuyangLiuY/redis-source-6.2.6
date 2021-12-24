@@ -264,6 +264,7 @@ void setCommand(client *c) {
     }
 
     c->argv[2] = tryObjectEncoding(c->argv[2]);
+	// c->argv[0]:命令，[1]:key,[2]:value
     setGenericCommand(c,flags,c->argv[1],c->argv[2],expire,unit,NULL,NULL);
 }
 
