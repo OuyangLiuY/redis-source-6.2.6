@@ -243,7 +243,7 @@ void pushGenericCommand(client *c, int where, int xx) {
 
         lobj = createQuicklistObject();
         quicklistSetOptions(lobj->ptr, server.list_max_ziplist_size,
-                            server.list_compress_depth);
+                            server.list_compress_depth);	// 设置快表得属性 fill = -2 默认
         dbAdd(c->db,c->argv[1],lobj);
     }
 

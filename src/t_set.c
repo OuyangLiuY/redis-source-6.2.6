@@ -41,7 +41,7 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
  * hash table. */
 robj *setTypeCreate(sds value) {
     if (isSdsRepresentableAsLongLong(value,NULL) == C_OK)
-        return createIntsetObject();
+        return createIntsetObject();	// 创建整数集合
     return createSetObject();
 }
 
@@ -304,10 +304,10 @@ void saddCommand(client *c) {
     robj *set;
     int j, added = 0;
 
-    set = lookupKeyWrite(c->db,c->argv[1]);
+    set = lookupKeyWrite(c->db,c->argv[1]);	// 从db中lookup一下
     if (checkType(c,set,OBJ_SET)) return;
     
-    if (set == NULL) {
+    if (set == NULL) {	// 不存在，就创建
         set = setTypeCreate(c->argv[2]->ptr);
         dbAdd(c->db,c->argv[1],set);
     }

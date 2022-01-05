@@ -248,7 +248,7 @@ robj *createSetObject(void) {
 }
 
 robj *createIntsetObject(void) {
-    intset *is = intsetNew();
+    intset *is = intsetNew();	// 给intset分配内存
     robj *o = createObject(OBJ_SET,is);
     o->encoding = OBJ_ENCODING_INTSET;
     return o;

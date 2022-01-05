@@ -207,11 +207,11 @@ int hashTypeExists(robj *o, sds field) {
 int hashTypeSet(robj *o, sds field, sds value, int flags) {
     int update = 0;
 
-    if (o->encoding == OBJ_ENCODING_ZIPLIST) {
+    if (o->encoding == OBJ_ENCODING_ZIPLIST) {		// 代表 zipList类型
         unsigned char *zl, *fptr, *vptr;
 
         zl = o->ptr;
-        fptr = ziplistIndex(zl, ZIPLIST_HEAD);
+        fptr = ziplistIndex(zl, ZIPLIST_HEAD);		//
         if (fptr != NULL) {
             fptr = ziplistFind(zl, fptr, (unsigned char*)field, sdslen(field), 1);
             if (fptr != NULL) {
@@ -226,17 +226,17 @@ int hashTypeSet(robj *o, sds field, sds value, int flags) {
             }
         }
 
-        if (!update) {
+        if (!update) {	// 说明是新的值
             /* Push new field/value pair onto the tail of the ziplist */
             zl = ziplistPush(zl, (unsigned char*)field, sdslen(field),
-                    ZIPLIST_TAIL);
+                    ZIPLIST_TAIL);	// 先在压缩表末尾插入字段
             zl = ziplistPush(zl, (unsigned char*)value, sdslen(value),
-                    ZIPLIST_TAIL);
+                    ZIPLIST_TAIL);	// 然后在压缩表末尾插入值
         }
         o->ptr = zl;
 
         /* Check if the ziplist needs to be converted to a hash table */
-        if (hashTypeLength(o) > server.hash_max_ziplist_entries)
+        if (hashTypeLength(o) > server.hash_max_ziplist_entries) // 检查是否需要将压缩表转成hash表
             hashTypeConvert(o, OBJ_ENCODING_HT);
     } else if (o->encoding == OBJ_ENCODING_HT) {
         dictEntry *de = dictFind(o->ptr,field);

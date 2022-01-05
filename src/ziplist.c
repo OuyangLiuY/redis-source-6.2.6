@@ -523,7 +523,7 @@ int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, un
     long long value;
 
     if (entrylen >= 32 || entrylen == 0) return 0;
-    if (string2ll((char*)entry,entrylen,&value)) {
+    if (string2ll((char*)entry,entrylen,&value)) {		// entry代表的char字符是否能够转成int类型
         /* Great, the string can be encoded. Check what's the smallest
          * of our encoding types that can hold this value. */
         if (value >= 0 && value <= 12) {
@@ -1287,27 +1287,28 @@ unsigned char *ziplistReplace(unsigned char *zl, unsigned char *p, unsigned char
 
     /* get metadata of the current entry */
     zlentry entry;
-    zipEntry(p, &entry);
+    zipEntry(p, &entry);	// 生成zipEntry结构体
 
     /* compute length of entry to store, excluding prevlen */
     unsigned int reqlen;
     unsigned char encoding = 0;
     long long value = 123456789; /* initialized to avoid warning. */
-    if (zipTryEncoding(s,slen,&value,&encoding)) {
-        reqlen = zipIntSize(encoding); /* encoding is set */
+    if (zipTryEncoding(s,slen,&value,&encoding)) {	// 检查下char *s能否转成int类型
+    	// 根据encoding类型计算一下所需长度
+        reqlen = zipIntSize(encoding); /* encoding is set */	
     } else {
         reqlen = slen; /* encoding == 0 */
     }
-    reqlen += zipStoreEntryEncoding(NULL,encoding,slen);
+    reqlen += zipStoreEntryEncoding(NULL,encoding,slen);	// 计算一下储存所需的长度
 
     if (reqlen == entry.lensize + entry.len) {
         /* Simply overwrite the element. */
         p += entry.prevrawlensize;
         p += zipStoreEntryEncoding(p,encoding,slen);
-        if (ZIP_IS_STR(encoding)) {
-            memcpy(p,s,slen);
+        if (ZIP_IS_STR(encoding)) {			// encoding代表字符串
+            memcpy(p,s,slen);				// 将s字符赋值给p，长度
         } else {
-            zipSaveInteger(p,value,encoding);
+            zipSaveInteger(p,value,encoding); // 将int值放入到zipEntry中
         }
     } else {
         /* Fallback. */

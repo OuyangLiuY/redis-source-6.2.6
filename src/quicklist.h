@@ -44,9 +44,9 @@
  * attempted_compress: 1 bit, boolean, used for verifying during testing.
  * extra: 10 bits, free for future use; pads out the remainder of 32 bits */
 typedef struct quicklistNode {
-    struct quicklistNode *prev;
+    struct quicklistNode *prev;		// 每个节点中又有指向下一个node和上一个node得指针
     struct quicklistNode *next;
-    unsigned char *zl;
+    unsigned char *zl;			// 快表得底层node节点使用得是ziplist压缩表
     unsigned int sz;             /* ziplist size in bytes */
     unsigned int count : 16;     /* count of items in ziplist */
     unsigned int encoding : 2;   /* RAW==1 or LZF==2 */
@@ -103,7 +103,7 @@ typedef struct quicklistBookmark {
  * 'bookmakrs are an optional feature that is used by realloc this struct,
  *      so that they don't consume memory when not used. */
 typedef struct quicklist {
-    quicklistNode *head;
+    quicklistNode *head;		// 快表指向头和尾得节点指针
     quicklistNode *tail;
     unsigned long count;        /* total count of all entries in all ziplists */
     unsigned long len;          /* number of quicklistNodes */
