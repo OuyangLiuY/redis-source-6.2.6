@@ -59,13 +59,13 @@ typedef struct dictEntry {
 } dictEntry;
 
 typedef struct dictType {
-    uint64_t (*hashFunction)(const void *key);
-    void *(*keyDup)(void *privdata, const void *key);
-    void *(*valDup)(void *privdata, const void *obj);
+    uint64_t (*hashFunction)(const void *key);				// 哈希函数
+    void *(*keyDup)(void *privdata, const void *key);		// keyDup
+    void *(*valDup)(void *privdata, const void *obj);		// valDup
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
-    void (*keyDestructor)(void *privdata, void *key);
-    void (*valDestructor)(void *privdata, void *obj);
-    int (*expandAllowed)(size_t moreMem, double usedRatio);
+    void (*keyDestructor)(void *privdata, void *key);		// key类型
+    void (*valDestructor)(void *privdata, void *obj);		// value类型
+    int (*expandAllowed)(size_t moreMem, double usedRatio);	// 允许扩容
 } dictType;
 
 /* This is our hash table structure. Every dictionary has two of this as we
