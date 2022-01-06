@@ -515,9 +515,9 @@ dictEntry *dictFind(dict *d, const void *key)
 
     if (dictSize(d) == 0) return NULL; /* dict is empty */
     if (dictIsRehashing(d)) _dictRehashStep(d);
-    h = dictHashKey(d, key);
+    h = dictHashKey(d, key);	// 根据哈希函数，获取哈希值
     for (table = 0; table <= 1; table++) {
-        idx = h & d->ht[table].sizemask;
+        idx = h & d->ht[table].sizemask;	// 拿到位置idx
         he = d->ht[table].table[idx];
         while(he) {
             if (key==he->key || dictCompareKeys(d, key, he->key))

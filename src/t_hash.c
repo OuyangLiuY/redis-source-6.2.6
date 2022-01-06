@@ -41,13 +41,13 @@ void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
     int i;
     size_t sum = 0;
 
-    if (o->encoding != OBJ_ENCODING_ZIPLIST) return;
+    if (o->encoding != OBJ_ENCODING_ZIPLIST) return;	// encoding 类型不是zipList，直接返回
 
     for (i = start; i <= end; i++) {
         if (!sdsEncodedObject(argv[i]))
             continue;
         size_t len = sdslen(argv[i]->ptr);
-        if (len > server.hash_max_ziplist_value) {
+        if (len > server.hash_max_ziplist_value) {	// 配置文件中，默认配置64
             hashTypeConvert(o, OBJ_ENCODING_HT);
             return;
         }
@@ -238,7 +238,7 @@ int hashTypeSet(robj *o, sds field, sds value, int flags) {
         /* Check if the ziplist needs to be converted to a hash table */
         if (hashTypeLength(o) > server.hash_max_ziplist_entries) // 检查是否需要将压缩表转成hash表
             hashTypeConvert(o, OBJ_ENCODING_HT);
-    } else if (o->encoding == OBJ_ENCODING_HT) {
+    } else if (o->encoding == OBJ_ENCODING_HT) {// 代表hash类型
         dictEntry *de = dictFind(o->ptr,field);
         if (de) {
             sdsfree(dictGetVal(de));
@@ -281,7 +281,7 @@ int hashTypeSet(robj *o, sds field, sds value, int flags) {
 int hashTypeDelete(robj *o, sds field) {
     int deleted = 0;
 
-    if (o->encoding == OBJ_ENCODING_ZIPLIST) {
+    if (o->encoding == OBJ_ENCODING_ZIPLIST) {		// zipList类型
         unsigned char *zl, *fptr;
 
         zl = o->ptr;
@@ -455,7 +455,7 @@ robj *hashTypeLookupWriteOrCreate(client *c, robj *key) {
     if (checkType(c,o,OBJ_HASH)) return NULL;
 
     if (o == NULL) {
-        o = createHashObject();
+        o = createHashObject();		// 创建空得hashObject
         dbAdd(c->db,key,o);
     }
     return o;
@@ -498,7 +498,7 @@ void hashTypeConvertZiplist(robj *o, int enc) {
 
 void hashTypeConvert(robj *o, int enc) {
     if (o->encoding == OBJ_ENCODING_ZIPLIST) {
-        hashTypeConvertZiplist(o, enc);
+        hashTypeConvertZiplist(o, enc);			// zipList转hash
     } else if (o->encoding == OBJ_ENCODING_HT) {
         serverPanic("Not implemented");
     } else {
@@ -655,18 +655,18 @@ void hsetnxCommand(client *c) {
         server.dirty++;
     }
 }
-
+// hset key1  name:ooox age:10
 void hsetCommand(client *c) {
     int i, created = 0;
     robj *o;
 
-    if ((c->argc % 2) == 1) {
+    if ((c->argc % 2) == 1) { // 必须是2得倍数
         addReplyErrorFormat(c,"wrong number of arguments for '%s' command",c->cmd->name);
         return;
     }
-
+	// 看是否存在key，没有则创建出key放入到c中
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
-    hashTypeTryConversion(o,c->argv,2,c->argc-1);
+    hashTypeTryConversion(o,c->argv,2,c->argc-1);	// 检查一下是否需要将zipList转成hash类型
 
     for (i = 2; i < c->argc; i += 2)
         created += !hashTypeSet(o,c->argv[i]->ptr,c->argv[i+1]->ptr,HASH_SET_COPY);
