@@ -3844,6 +3844,7 @@ void call(client *c, int flags) {
          * propagation is needed. Note that modules commands handle replication
          * in an explicit way, so we never replicate them automatically. */
         if (propagate_flags != PROPAGATE_NONE && !(c->cmd->flags & CMD_MODULE))
+			// 实际执行代码
             propagate(c->cmd,c->db->id,c->argv,c->argc,propagate_flags);
     }
 
