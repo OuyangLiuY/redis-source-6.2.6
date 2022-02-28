@@ -201,15 +201,17 @@
                                representing the previous entry len. */
 
 /* Different encoding/length possibilities */
-#define ZIP_STR_MASK 0xc0
-#define ZIP_INT_MASK 0x30
-#define ZIP_STR_06B (0 << 6)
-#define ZIP_STR_14B (1 << 6)
-#define ZIP_STR_32B (2 << 6)
-#define ZIP_INT_16B (0xc0 | 0<<4)
-#define ZIP_INT_32B (0xc0 | 1<<4)
-#define ZIP_INT_64B (0xc0 | 2<<4)
-#define ZIP_INT_24B (0xc0 | 3<<4)
+#define ZIP_STR_MASK 0xc0			// 1100 0000
+#define ZIP_INT_MASK 0x30			// 0011 0000
+									// str类型(char)
+#define ZIP_STR_06B (0 << 6)		// 0000	0000
+#define ZIP_STR_14B (1 << 6)		// 0100 0000
+#define ZIP_STR_32B (2 << 6)		// 1000 0000
+									// int类型						
+#define ZIP_INT_16B (0xc0 | 0<<4)	// 1100 0000
+#define ZIP_INT_32B (0xc0 | 1<<4)	// 1101 0000
+#define ZIP_INT_64B (0xc0 | 2<<4)	// 1100 0000
+#define ZIP_INT_24B (0xc0 | 3<<4)	// 1111 0000
 #define ZIP_INT_8B 0xfe
 
 /* 4 bit integer immediate encoding |1111xxxx| with xxxx between

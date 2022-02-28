@@ -133,7 +133,7 @@ static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
             return 0;
         }
     }
-
+	// 二分查找当前value值
     while(max >= min) {
         mid = ((unsigned int)min + (unsigned int)max) >> 1;
         cur = _intsetGet(is,mid);
@@ -146,7 +146,7 @@ static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
         }
     }
 
-    if (value == cur) {
+    if (value == cur) {	// 如果相等，那么将mid赋值给pos
         if (pos) *pos = mid;
         return 1;
     } else {

@@ -1519,8 +1519,8 @@ struct redisServer {
     int sort_bypattern;
     int sort_store;
     /* Zip structure config, see redis.conf for more information  */
-    size_t hash_max_ziplist_entries;
-    size_t hash_max_ziplist_value;
+    size_t hash_max_ziplist_entries;	// 默认配置512
+    size_t hash_max_ziplist_value;		// 默认配置64
     size_t set_max_intset_entries;
     size_t zset_max_ziplist_entries;
     size_t zset_max_ziplist_value;

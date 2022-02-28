@@ -500,7 +500,7 @@ int quicklistPushHead(quicklist *quicklist, void *value, size_t sz) {
     quicklistNode *orig_head = quicklist->head;
     assert(sz < UINT32_MAX); /* TODO: add support for quicklist nodes that are sds encoded (not zipped) */
     if (likely(
-            _quicklistNodeAllowInsert(quicklist->head, quicklist->fill, sz))) { // 允许插入
+            _quicklistNodeAllowInsert(quicklist->head, quicklist->fill, sz))) { // 为真允许在头节点插入
         quicklist->head->zl =
             ziplistPush(quicklist->head->zl, value, sz, ZIPLIST_HEAD);
         quicklistNodeUpdateSz(quicklist->head);
@@ -909,12 +909,13 @@ REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry,
     if (!full && after) {
         D("Not full, inserting after current position.");
         quicklistDecompressNodeForUse(node);
-        unsigned char *next = ziplistNext(node->zl, entry->zi);
+        unsigned char *next = ziplistNext(node->zl, entry->zi);	// 找到ziplist中zi位置的下一个entry
         if (next == NULL) {
-            node->zl = ziplistPush(node->zl, value, sz, ZIPLIST_TAIL);
+            node->zl = ziplistPush(node->zl, value, sz, ZIPLIST_TAIL);	// next不存在直接push
         } else {
-            node->zl = ziplistInsert(node->zl, next, value, sz);
+            node->zl = ziplistInsert(node->zl, next, value, sz);		// next存在那么insert
         }
+		// 更新相关属性值
         node->count++;
         quicklistNodeUpdateSz(node);
         quicklistRecompressOnly(quicklist, node);

@@ -82,7 +82,8 @@ robj *createRawStringObject(const char *ptr, size_t len) {
  * an object where the sds string is actually an unmodifiable string
  * allocated in the same chunk as the object itself. */
 robj *createEmbeddedStringObject(const char *ptr, size_t len) {
-    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+	// ptr 是sds得指针
+	robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1); // 16(robj) + 3() + len(最大44) + 1 约等于 64(CPU缓存行就是64B)
     struct sdshdr8 *sh = (void*)(o+1);
 
     o->type = OBJ_STRING;
@@ -117,7 +118,8 @@ robj *createEmbeddedStringObject(const char *ptr, size_t len) {
  * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
 #define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44
 robj *createStringObject(const char *ptr, size_t len) {
-    if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT)
+	// len 长度 小于等于44
+	if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT)
         return createEmbeddedStringObject(ptr,len);
     else
         return createRawStringObject(ptr,len);
@@ -226,14 +228,14 @@ robj *dupStringObject(const robj *o) {
     }
 }
 
-robj *createQuicklistObject(void) {
+robj *createQuicklistObject(void) {	// 创建快表
     quicklist *l = quicklistCreate();
     robj *o = createObject(OBJ_LIST,l);
     o->encoding = OBJ_ENCODING_QUICKLIST;
     return o;
 }
 
-robj *createZiplistObject(void) {
+robj *createZiplistObject(void) {			// 压缩表
     unsigned char *zl = ziplistNew();
     robj *o = createObject(OBJ_LIST,zl);
     o->encoding = OBJ_ENCODING_ZIPLIST;
@@ -247,7 +249,7 @@ robj *createSetObject(void) {
     return o;
 }
 
-robj *createIntsetObject(void) {
+robj *createIntsetObject(void) {			// 整数集
     intset *is = intsetNew();	// 给intset分配内存
     robj *o = createObject(OBJ_SET,is);
     o->encoding = OBJ_ENCODING_INTSET;
@@ -265,8 +267,9 @@ robj *createZsetObject(void) {
     zset *zs = zmalloc(sizeof(*zs));
     robj *o;
 
-    zs->dict = dictCreate(&zsetDictType,NULL);
-    zs->zsl = zslCreate();
+	// hash表
+    zs->dict = dictCreate(&zsetDictType,NULL);	// 字典
+    zs->zsl = zslCreate(); // 使用跳表查找						// zskiplist
     o = createObject(OBJ_ZSET,zs);
     o->encoding = OBJ_ENCODING_SKIPLIST;
     return o;
@@ -460,6 +463,7 @@ robj *tryObjectEncoding(robj *o) {				// 尝试encode一个字符串以节省空
      * Note that we are sure that a string larger than 20 chars is not
      * representable as a 32 nor 64 bit integer. */
     len = sdslen(s);
+	// 只有长度<= 20 并且能转成 2l 类型，才能是转成int
     if (len <= 20 && string2l(s,len,&value)) {
         /* This object is encodable as a long. Try to use a shared object.
          * Note that we avoid using shared integers when maxmemory is used
