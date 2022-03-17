@@ -1004,13 +1004,13 @@ typedef struct zskiplistNode {
     struct zskiplistNode *backward;
     struct zskiplistLevel {
         struct zskiplistNode *forward;
-        unsigned long span;
+        unsigned long span;				// 表示向前指针跳过了多少个节点，用于排名查找，
     } level[];
 } zskiplistNode;
 
 typedef struct zskiplist {
     struct zskiplistNode *header, *tail;
-    unsigned long length;
+    unsigned long length;				// zset中数据长度
     int level;
 } zskiplist;
 

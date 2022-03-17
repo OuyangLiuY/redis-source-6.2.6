@@ -1932,6 +1932,7 @@ void updateCachedTime(int update_daylight_info) {
     }
 }
 
+// 检查子进程是否已经结束退出
 void checkChildrenDone(void) {
     int statloc = 0;
     pid_t pid;
@@ -1958,9 +1959,9 @@ void checkChildrenDone(void) {
                 strChildType(server.child_type),
                 (int) server.child_pid);
         } else if (pid == server.child_pid) {
-            if (server.child_type == CHILD_TYPE_RDB) {
+            if (server.child_type == CHILD_TYPE_RDB) {		// RDB类型
                 backgroundSaveDoneHandler(exitcode, bysignal);
-            } else if (server.child_type == CHILD_TYPE_AOF) {
+            } else if (server.child_type == CHILD_TYPE_AOF) {	// aof类型
                 backgroundRewriteDoneHandler(exitcode, bysignal);
             } else if (server.child_type == CHILD_TYPE_MODULE) {
                 ModuleForkDoneHandler(exitcode, bysignal);
@@ -2022,14 +2023,14 @@ void cronUpdateMemoryStats() {
  * Here is where we do a number of things that need to be done asynchronously.
  * For instance:
  *
- * - Active expired keys collection (it is also performed in a lazy way on
+ * - Active expired keys collection (it is also performed in a lazy way on	// 过期时间处理
  *   lookup).
- * - Software watchdog.
- * - Update some statistic.
- * - Incremental rehashing of the DBs hash tables.
- * - Triggering BGSAVE / AOF rewrite, and handling of terminated children.
- * - Clients timeout of different kinds.
- * - Replication reconnection.
+ * - Software watchdog.														// 看门狗
+ * - Update some statistic.													// 更新数据
+ * - Incremental rehashing of the DBs hash tables.							// reHash
+ * - Triggering BGSAVE / AOF rewrite, and handling of terminated children.	// AOF/触发BGSAVE
+ * - Clients timeout of different kinds.									// 客户端超时
+ * - Replication reconnection.												// 主从连接
  * - Many more...
  *
  * Everything directly called here will be called server.hz times per second,
@@ -2037,6 +2038,7 @@ void cronUpdateMemoryStats() {
  * a macro is used: run_with_period(milliseconds) { .... }
  */
 
+// 每秒执行的定时任务
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     int j;
     UNUSED(eventLoop);
@@ -2139,14 +2141,14 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     if (!hasActiveChildProcess() &&
         server.aof_rewrite_scheduled)
     {
-        rewriteAppendOnlyFileBackground();
+        rewriteAppendOnlyFileBackground();	// 创建子进程进行数据的后台处理
     }
 
     /* Check if a background saving or AOF rewrite in progress terminated. */
     if (hasActiveChildProcess() || ldbPendingChildren())
     {
         run_with_period(1000) receiveChildInfo();
-        checkChildrenDone();
+        checkChildrenDone();		// 子进程处理完毕之后的一些操作
     } else {
         /* If there is not a background saving/rewrite in progress check if
          * we have to save/rewrite now. */
@@ -3307,7 +3309,8 @@ void initServer(void) {
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
      * expired keys and so forth. */
-    // 给事件循环eventLoop 设置属性，
+    // 创建timeEvent
+    // 定时任务
     if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
         exit(1);
@@ -5887,7 +5890,7 @@ int redisFork(int purpose) {
 
     int childpid;
     long long start = ustime();
-    if ((childpid = fork()) == 0) {
+    if ((childpid = fork()) == 0) {	// 系统调用 fork函数
         /* Child */
         server.in_fork_child = purpose;
         setOOMScoreAdj(CONFIG_OOM_BGCHILD);

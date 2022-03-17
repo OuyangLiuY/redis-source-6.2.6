@@ -136,50 +136,54 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
 
     serverAssert(!isnan(score));
     x = zsl->header;
-    for (i = zsl->level-1; i >= 0; i--) {
+	// 遍历查找当前zsl中需要插入的ele的节点位置，用两个数组rank和update做查询过程中的缓存
+    for (i = zsl->level-1; i >= 0; i--) {		
         /* store rank that is crossed to reach the insert position */
         rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
-        while (x->level[i].forward &&
-                (x->level[i].forward->score < score ||
-                    (x->level[i].forward->score == score &&
+        while (x->level[i].forward &&							// 有下一个节点
+                (x->level[i].forward->score < score ||			// 下一个节点的值小于传入的score，
+                    (x->level[i].forward->score == score &&		// 或者在值相等的时候，传入的ele要比节点上的ele大
                     sdscmp(x->level[i].forward->ele,ele) < 0)))
         {
-            rank[i] += x->level[i].span;
-            x = x->level[i].forward;
+            rank[i] += x->level[i].span;	// 临时数组，存当前层上span的累加
+            x = x->level[i].forward;		// x到当前层的下一个节点
         }
-        update[i] = x;
+        update[i] = x;						// update缓存的是各层上不符合while条件中的节点，(更新节点的时候直接拿来用)
     }
     /* we assume the element is not already inside, since we allow duplicated
      * scores, reinserting the same element should never happen since the
      * caller of zslInsert() should test in the hash table if the element is
      * already inside or not. */
-    level = zslRandomLevel();
-    if (level > zsl->level) {
+    level = zslRandomLevel();	// 随机生成层高
+    if (level > zsl->level) {	// 如果随机生成的层高，大于了当前zsl的层高，那么将高于当前level的部分进行数据赋值
         for (i = zsl->level; i < level; i++) {
             rank[i] = 0;
-            update[i] = zsl->header;
-            update[i]->level[i].span = zsl->length;
+            update[i] = zsl->header;					// 将头节点缓存的update[i]中，
+            update[i]->level[i].span = zsl->length;		// 更新头节点在当前level中span的值为zsl->length
         }
-        zsl->level = level;
+        zsl->level = level;								// 最后更新zsl的level
     }
-    x = zslCreateNode(level,score,ele);
-    for (i = 0; i < level; i++) {
-        x->level[i].forward = update[i]->level[i].forward;
-        update[i]->level[i].forward = x;
+    x = zslCreateNode(level,score,ele);			// 创建节点
+    for (i = 0; i < level; i++) {				// 从第0层开始遍历插入x
+		// 修正x所处位置的forward
+		x->level[i].forward = update[i]->level[i].forward;	// x的forward指向update中的forward		  forward-> x -> forward
+        update[i]->level[i].forward = x;					// update中的指向x，此时x已经进入到当前层中
 
         /* update span covered by update[i] as x is inserted here */
-        x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
-        update[i]->level[i].span = (rank[0] - rank[i]) + 1;
+		// rank[0]是0层上head到小于x位置上距离，rank[i]是当前i层上head到小于x节点的距离
+		// ((rank[0]-rank[i]) + 1) --- x ---(update.level[i].span - (rank[0]-rank[i]))
+        x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);	
+        update[i]->level[i].span = (rank[0] - rank[i]) + 1;	
     }
 
     /* increment span for untouched levels */
-    for (i = level; i < zsl->level; i++) {
+    for (i = level; i < zsl->level; i++) {			// 更新未达到的level，因为有可能leve到zsl->level
         update[i]->level[i].span++;
     }
 
     x->backward = (update[0] == zsl->header) ? NULL : update[0];
     if (x->level[0].forward)
-        x->level[0].forward->backward = x;
+        x->level[0].forward->backward = x;	// 如果x在level[0].forward存在，那么他的下一个节点的前置节点就是x
     else
         zsl->tail = x;
     zsl->length++;
