@@ -42,11 +42,11 @@ typedef struct {
  * RDB / AOF saving process from the child to the parent (for instance
  * the amount of copy on write memory used) */
 void openChildInfoPipe(void) {
-    if (pipe(server.child_info_pipe) == -1) {
+    if (pipe(server.child_info_pipe) == -1) {	// 开启child管道
         /* On error our two file descriptors should be still set to -1,
          * but we call anyway closeChildInfoPipe() since can't hurt. */
         closeChildInfoPipe();
-    } else if (anetNonBlock(NULL,server.child_info_pipe[0]) != ANET_OK) {
+    } else if (anetNonBlock(NULL,server.child_info_pipe[0]) != ANET_OK) {	// 设置状态
         closeChildInfoPipe();
     } else {
         server.child_info_nread = 0;

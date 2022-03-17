@@ -1420,7 +1420,166 @@ typedef struct dictEntry {
 
 ### 7.4、zset：有序集合
 
+7.4.1、zset 原理
+
+
+
+7.4.2、zset 结构
+
+zset的实际底层就是快表数据结构，但是是具有增强型的快表，具有score和，span，数据sds。
+
+```c
+/* ZSETs use a specialized version of Skiplists */
+typedef struct zskiplistNode {
+    sds ele;
+    double score;
+    struct zskiplistNode *backward;
+    struct zskiplistLevel {
+        struct zskiplistNode *forward;
+        unsigned long span;				// 表示向前指针跳过了多少个节点，用于排名查找
+    } level[];
+} zskiplistNode;
+
+typedef struct zskiplist {
+    struct zskiplistNode *header, *tail;
+    unsigned long length;				// zset数据个数
+    int level;
+} zskiplist;
+
+typedef struct zset {
+    dict *dict;
+    zskiplist *zsl;
+} zset;
+```
+
+
+
+7.4.2、zset关键函数
+
+```c
+/* Insert a new node in the skiplist. Assumes the element does not already
+ * exist (up to the caller to enforce that). The skiplist takes ownership
+ * of the passed SDS string 'ele'. */
+zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
+    zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
+    unsigned int rank[ZSKIPLIST_MAXLEVEL];
+    int i, level;
+
+    serverAssert(!isnan(score));
+    x = zsl->header;
+	// 遍历查找当前zsl中需要插入的ele的节点位置，用两个数组rank和update做查询过程中的缓存
+    for (i = zsl->level-1; i >= 0; i--) {		
+        /* store rank that is crossed to reach the insert position */
+        rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
+        while (x->level[i].forward &&							// 有下一个节点
+                (x->level[i].forward->score < score ||			// 下一个节点的值小于传入的score，
+                    (x->level[i].forward->score == score &&		// 或者在值相等的时候，传入的ele要比节点上的ele大
+                    sdscmp(x->level[i].forward->ele,ele) < 0)))
+        {
+            rank[i] += x->level[i].span;	// 临时数组，存当前层上span的累加
+            x = x->level[i].forward;		// x到当前层的下一个节点
+        }
+        update[i] = x;						// update缓存的是各层上不符合while条件中的节点，(更新节点的时候直接拿来用)
+    }
+    /* we assume the element is not already inside, since we allow duplicated
+     * scores, reinserting the same element should never happen since the
+     * caller of zslInsert() should test in the hash table if the element is
+     * already inside or not. */
+    level = zslRandomLevel();	// 随机生成层高
+    if (level > zsl->level) {	// 如果随机生成的层高，大于了当前zsl的层高，那么将高于当前level的部分进行数据赋值
+        for (i = zsl->level; i < level; i++) {
+            rank[i] = 0;
+            update[i] = zsl->header;					// 将头节点缓存的update[i]中，
+            update[i]->level[i].span = zsl->length;		// 更新头节点在当前level中span的值为zsl->length
+        }
+        zsl->level = level;								// 最后更新zsl的level
+    }
+    x = zslCreateNode(level,score,ele);			// 创建节点
+    for (i = 0; i < level; i++) {				// 从第0层开始遍历插入x
+		// 修正x所处位置的forward
+		x->level[i].forward = update[i]->level[i].forward;	// x的forward指向update中的forward		  forward-> x -> forward
+        update[i]->level[i].forward = x;					// update中的指向x，此时x已经进入到当前层中
+
+        /* update span covered by update[i] as x is inserted here */
+		// rank[0]是0层上head到小于x位置上距离，rank[i]是当前i层上head到小于x节点的距离
+		// ((rank[0]-rank[i]) + 1) --- x ---(update.level[i].span - (rank[0]-rank[i]))
+        x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);	
+        update[i]->level[i].span = (rank[0] - rank[i]) + 1;	
+    }
+
+    /* increment span for untouched levels */
+    for (i = level; i < zsl->level; i++) {			// 更新未达到的level，因为有可能leve到zsl->level
+        update[i]->level[i].span++;
+    }
+
+    x->backward = (update[0] == zsl->header) ? NULL : update[0];
+    if (x->level[0].forward)
+        x->level[0].forward->backward = x;	// 如果x在level[0].forward存在，那么他的下一个节点的前置节点就是x
+    else
+        zsl->tail = x;
+    zsl->length++;
+    return x;
+}
+```
+
+
+
 ### 7.5、hash：散列
+
+
+
+## 8、持久化AOF和RDB
+
+
+
+rewriteAppendOnlyFileBackground函数：
+
+```c
+int rewriteAppendOnlyFileBackground(void) {
+    pid_t childpid;
+
+    if (hasActiveChildProcess()) return C_ERR;
+    if (aofCreatePipes() != C_OK) return C_ERR;
+    if ((childpid = redisFork(CHILD_TYPE_AOF)) == 0) {
+        char tmpfile[256];
+
+        /* Child */
+        redisSetProcTitle("redis-aof-rewrite");
+        redisSetCpuAffinity(server.aof_rewrite_cpulist);
+        snprintf(tmpfile,256,"temp-rewriteaof-bg-%d.aof", (int) getpid());
+        if (rewriteAppendOnlyFile(tmpfile) == C_OK) {
+            sendChildCowInfo(CHILD_INFO_TYPE_AOF_COW_SIZE, "AOF rewrite");
+            exitFromChild(0);
+        } else {
+            exitFromChild(1);
+        }
+    } else {
+        /* Parent */
+        if (childpid == -1) {
+            serverLog(LL_WARNING,
+                "Can't rewrite append only file in background: fork: %s",
+                strerror(errno));
+            aofClosePipes();
+            return C_ERR;
+        }
+        serverLog(LL_NOTICE,
+            "Background append only file rewriting started by pid %ld",(long) childpid);
+        server.aof_rewrite_scheduled = 0;
+        server.aof_rewrite_time_start = time(NULL);
+
+        /* We set appendseldb to -1 in order to force the next call to the
+         * feedAppendOnlyFile() to issue a SELECT command, so the differences
+         * accumulated by the parent into server.aof_rewrite_buf will start
+         * with a SELECT statement and it will be safe to merge. */
+        server.aof_selected_db = -1;
+        replicationScriptCacheFlush();
+        return C_OK;
+    }
+    return C_OK; /* unreached */
+}
+```
+
+
 
 ### 第一阶段 熟悉Redis基础数据结构
 - 阅读Redis的数据结构部分，基本位于如下文件中：内存分配 zmalloc.c和zmalloc.h

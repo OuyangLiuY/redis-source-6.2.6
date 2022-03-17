@@ -216,7 +216,7 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
     if (te == NULL) return AE_ERR;
     te->id = id;
     te->when = getMonotonicUs() + milliseconds * 1000;
-    te->timeProc = proc;
+    te->timeProc = proc;								// 回调函数
     te->finalizerProc = finalizerProc;
     te->clientData = clientData;
     te->prev = NULL;
