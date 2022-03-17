@@ -137,7 +137,7 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
     serverAssert(!isnan(score));
     x = zsl->header;
 	// 遍历查找当前zsl中需要插入的ele的节点位置，用两个数组rank和update做查询过程中的缓存
-    for (i = zsl->level-1; i >= 0; i--) {		
+    for (i = zsl->level-1; i >= 0; i--) {	    // 从最高层开始遍历
         /* store rank that is crossed to reach the insert position */
         rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
         while (x->level[i].forward &&							// 有下一个节点
@@ -172,8 +172,8 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
         /* update span covered by update[i] as x is inserted here */
 		// rank[0]是0层上head到小于x位置上距离，rank[i]是当前i层上head到小于x节点的距离
 		// ((rank[0]-rank[i]) + 1) --- x ---(update.level[i].span - (rank[0]-rank[i]))
-        x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);	
-        update[i]->level[i].span = (rank[0] - rank[i]) + 1;	
+        x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
+        update[i]->level[i].span = (rank[0] - rank[i]) + 1;
     }
 
     /* increment span for untouched levels */
