@@ -1867,6 +1867,8 @@ void databasesCron(void) {
     /* Perform hash tables rehashing if needed, but only if there are no
      * other processes saving the DB on disk. Otherwise rehashing is bad
      * as will cause a lot of copy-on-write of memory pages. */
+     // 如果需要，执行哈希表和rehash，但只能是在磁盘上没有其他进程保存DB的情况下。
+     // 否则rehash过程是不好的，会导致大量内存页的写时复制。
     if (!hasActiveChildProcess()) {
         /* We use global counters so if we stop the computation at a given
          * DB we'll be able to start from the successive in the next
@@ -2134,10 +2136,12 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     clientsCron();
 
     /* Handle background operations on Redis databases. */
+	// 后台进程操作数据，包括key过期，resize，和rehash
     databasesCron();
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. */
+     // 开始调度aof写操作，直到bgsave被调用
     if (!hasActiveChildProcess() &&
         server.aof_rewrite_scheduled)
     {
@@ -2205,7 +2209,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * a higher frequency. */
     run_with_period(1000) {
         if (server.aof_state == AOF_ON && server.aof_last_write_status == C_ERR)
-            flushAppendOnlyFile(0);
+            flushAppendOnlyFile(0);		// 刷盘
     }
 
     /* Clear the paused clients state if needed. */
@@ -3610,8 +3614,8 @@ void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
 
     if (server.aof_state != AOF_OFF && flags & PROPAGATE_AOF)
         feedAppendOnlyFile(cmd,dbid,argv,argc);		// 添加到AOF文件
-    if (flags & PROPAGATE_REPL)
-        replicationFeedSlaves(server.slaves,dbid,argv,argc);	// 复制给从节点
+    if (flags & PROPAGATE_REPL)						// 是否开启了主从同步
+        replicationFeedSlaves(server.slaves,dbid,argv,argc);	// 同步数据给从节点
 }
 
 /* Used inside commands to schedule the propagation of additional commands
@@ -4269,7 +4273,7 @@ int processCommand(client *c) {
         addReply(c,shared.queued);
     } else {
         // redis 执行命令核心函数
-        call(c,CMD_CALL_FULL);
+        call(c,CMD_CALL_FULL);	// 1:数据的写入，2:key，ready
         c->woff = server.master_repl_offset;
         if (listLength(server.ready_keys))
             handleClientsBlockedOnKeys();	// 处理客户端被阻塞得keys，释放ready_keys
@@ -5903,7 +5907,7 @@ int redisFork(int purpose) {
         server.stat_fork_time = ustime()-start;
         server.stat_fork_rate = (double) zmalloc_used_memory() * 1000000 / server.stat_fork_time / (1024*1024*1024); /* GB per second. */
         latencyAddSampleIfNeeded("fork",server.stat_fork_time/1000);
-        if (childpid == -1) {
+        if (childpid == -1) {	// -1说明fork失败。那么关闭pipe
             if (isMutuallyExclusiveChildType(purpose)) closeChildInfoPipe();
             return -1;
         }

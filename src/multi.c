@@ -163,14 +163,14 @@ void execCommand(client *c) {
     struct redisCommand *orig_cmd;
     int was_master = server.masterhost == NULL;
 
-    if (!(c->flags & CLIENT_MULTI)) {
+    if (!(c->flags & CLIENT_MULTI)) {		// 不存咋 multi命令，回复客户端，并退出
         addReplyError(c,"EXEC without MULTI");
         return;
     }
 
     /* EXEC with expired watched key is disallowed*/
-    if (isWatchedKeyExpired(c)) {
-        c->flags |= (CLIENT_DIRTY_CAS);
+    if (isWatchedKeyExpired(c)) {		// 检查key是不是已经过期了
+        c->flags |= (CLIENT_DIRTY_CAS);	// 如果过期，那么标记为dirty
     }
 
     /* Check if we need to abort the EXEC because:
@@ -179,14 +179,14 @@ void execCommand(client *c) {
      * A failed EXEC in the first case returns a multi bulk nil object
      * (technically it is not an error but a special behavior), while
      * in the second an EXECABORT error is returned. */
-    if (c->flags & (CLIENT_DIRTY_CAS | CLIENT_DIRTY_EXEC)) {
+    if (c->flags & (CLIENT_DIRTY_CAS | CLIENT_DIRTY_EXEC)) {	// 判断状态，
         if (c->flags & CLIENT_DIRTY_EXEC) {
             addReplyErrorObject(c, shared.execaborterr);
         } else {
             addReply(c, shared.nullarray[c->resp]);
         }
 
-        discardTransaction(c);
+        discardTransaction(c);	// 状态异常，丢弃事务
         return;
     }
 
@@ -237,6 +237,7 @@ void execCommand(client *c) {
                 "This command is no longer allowed for the "
                 "following reason: %s", reason);
         } else {
+			// 最终调用call函数，批量执行事务命令
             call(c,server.loading ? CMD_CALL_NONE : CMD_CALL_FULL);
             serverAssert((c->flags & CLIENT_BLOCKED) == 0);
         }
@@ -254,10 +255,11 @@ void execCommand(client *c) {
     c->argv = orig_argv;
     c->argc = orig_argc;
     c->cmd = orig_cmd;
-    discardTransaction(c);
+    discardTransaction(c);		// 恢复状态，unwatch所有的key
 
     /* Make sure the EXEC command will be propagated as well if MULTI
      * was already propagated. */
+     // 是否需要将multi命令进行传播
     if (server.propagate_in_transaction) {
         int is_master = server.masterhost == NULL;
         server.dirty++;
@@ -268,6 +270,7 @@ void execCommand(client *c) {
          * backlog with the final EXEC. */
         if (server.repl_backlog && was_master && !is_master) {
             char *execcmd = "*1\r\n$4\r\nEXEC\r\n";
+			// 添加数据到backlog中，等待有事件去执行back_log的复制操作
             feedReplicationBacklog(execcmd,strlen(execcmd));
         }
         afterPropagateExec();
@@ -384,7 +387,7 @@ void touchWatchedKey(redisDb *db, robj *key) {
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
 
-        c->flags |= CLIENT_DIRTY_CAS;
+        c->flags |= CLIENT_DIRTY_CAS;	// 此时这个key被操作了，那么就将这个key设置为dirty
     }
 }
 

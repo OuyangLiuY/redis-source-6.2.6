@@ -99,7 +99,8 @@ static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 void *ztrymalloc_usable(size_t size, size_t *usable) {
     ASSERT_NO_SIZE_OVERFLOW(size);
     void *ptr = malloc(MALLOC_MIN_SIZE(size)+PREFIX_SIZE);
-
+	// PREFIX_SIZE 用来保存，当前分配的ptr的大小
+	// size不代办实际使用了多少个字节，只代表当前分配的大小
     if (!ptr) return NULL;
 #ifdef HAVE_MALLOC_SIZE
     size = zmalloc_size(ptr);
@@ -107,10 +108,10 @@ void *ztrymalloc_usable(size_t size, size_t *usable) {
     if (usable) *usable = size;
     return ptr;
 #else
-    *((size_t*)ptr) = size;
+    *((size_t*)ptr) = size;	// size_t位置存放size大小
     update_zmalloc_stat_alloc(size+PREFIX_SIZE);
     if (usable) *usable = size;
-    return (char*)ptr+PREFIX_SIZE;
+    return (char*)ptr+PREFIX_SIZE;	// 这就是真正的对象指针
 #endif
 }
 
@@ -216,8 +217,8 @@ void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable) {
         return ztrymalloc_usable(size, usable);
 
 #ifdef HAVE_MALLOC_SIZE
-    oldsize = zmalloc_size(ptr);
-    newptr = realloc(ptr,size);
+    oldsize = zmalloc_size(ptr);		// 计算已经分配的内存大小
+    newptr = realloc(ptr,size);			// 计算需要分配内存的大小
     if (newptr == NULL) {
         if (usable) *usable = 0;
         return NULL;
@@ -229,25 +230,25 @@ void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable) {
     if (usable) *usable = size;
     return newptr;
 #else
-    realptr = (char*)ptr-PREFIX_SIZE;
-    oldsize = *((size_t*)realptr);
-    newptr = realloc(realptr,size+PREFIX_SIZE);
+    realptr = (char*)ptr-PREFIX_SIZE;	// 拿到真是ptr指针
+    oldsize = *((size_t*)realptr);		// 转成size_t,代表了旧的空间size
+    newptr = realloc(realptr,size+PREFIX_SIZE);	// 新的size + PREFIX_SIZE
     if (newptr == NULL) {
         if (usable) *usable = 0;
         return NULL;
     }
 
     *((size_t*)newptr) = size;
-    update_zmalloc_stat_free(oldsize);
-    update_zmalloc_stat_alloc(size);
+    update_zmalloc_stat_free(oldsize);	// 更新释放旧的
+    update_zmalloc_stat_alloc(size);	// 更新incr
     if (usable) *usable = size;
-    return (char*)newptr+PREFIX_SIZE;
+    return (char*)newptr+PREFIX_SIZE;	// 新的newptr + 偏移size，就是分配的真实指针
 #endif
 }
 
 /* Reallocate memory and zero it or panic */
 void *zrealloc(void *ptr, size_t size) {
-    ptr = ztryrealloc_usable(ptr, size, NULL);			// 分配内存
+   	 ptr = ztryrealloc_usable(ptr, size, NULL);			// 分配内存
     if (!ptr && size != 0) zmalloc_oom_handler(size);	// 分配内存失败，打印异常
     return ptr;
 }

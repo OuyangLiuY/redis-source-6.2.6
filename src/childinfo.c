@@ -68,7 +68,7 @@ void closeChildInfoPipe(void) {
 
 /* Send save data to parent. */
 void sendChildInfoGeneric(childInfoType info_type, size_t keys, double progress, char *pname) {
-    if (server.child_info_pipe[1] == -1) return;
+    if (server.child_info_pipe[1] == -1) return;	// 如果没有开启子进程pipe
 
     static monotime cow_updated = 0;
     static uint64_t cow_update_cost = 0;
@@ -105,6 +105,7 @@ void sendChildInfoGeneric(childInfoType info_type, size_t keys, double progress,
 
     ssize_t wlen = sizeof(data);
 
+	// 写数据给到pipe[1]
     if (write(server.child_info_pipe[1], &data, wlen) != wlen) {
         /* Nothing to do on error, this will be detected by the other side. */
     }

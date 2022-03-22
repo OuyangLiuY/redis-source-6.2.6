@@ -90,18 +90,18 @@ void blockClient(client *c, int btype) {
     /* Master client should never be blocked unless pause or module */
     serverAssert(!(c->flags & CLIENT_MASTER &&
                    btype != BLOCKED_MODULE &&
-                   btype != BLOCKED_PAUSE));
+                   btype != BLOCKED_PAUSE));	// 检查状态
 
-    c->flags |= CLIENT_BLOCKED;
-    c->btype = btype;
-    server.blocked_clients++;
+    c->flags |= CLIENT_BLOCKED;	// 给当前client设置状态
+    c->btype = btype;			// 设置block类型
+    server.blocked_clients++;	// 全局变量更新
     server.blocked_clients_by_type[btype]++;
-    addClientToTimeoutTable(c);
+    addClientToTimeoutTable(c);	// 增加超时管理
     if (btype == BLOCKED_PAUSE) {
         listAddNodeTail(server.paused_clients, c);
         c->paused_list_node = listLast(server.paused_clients);
         /* Mark this client to execute its command */
-        c->flags |= CLIENT_PENDING_COMMAND;
+        c->flags |= CLIENT_PENDING_COMMAND;		// 修改状态，等待执行命令
     }
 }
 
@@ -660,14 +660,14 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
             int retval;
 
             /* For every key we take a list of clients blocked for it */
-            l = listCreate();
-            retval = dictAdd(c->db->blocking_keys,keys[j],l);
+            l = listCreate();	// 先创建
+            retval = dictAdd(c->db->blocking_keys,keys[j],l);	// 添加到阻塞使用的dict上
             incrRefCount(keys[j]);
             serverAssertWithInfo(c,keys[j],retval == DICT_OK);
         } else {
             l = dictGetVal(de);
         }
-        listAddNodeTail(l,c);
+        listAddNodeTail(l,c);	// 添加到队尾
         bki->listnode = listLast(l);
     }
     blockClient(c,btype);

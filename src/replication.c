@@ -247,7 +247,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
             dictid_len = ll2string(llstr,sizeof(llstr),dictid);
             selectcmd = createObject(OBJ_STRING,
                 sdscatprintf(sdsempty(),
-                "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n",
+                "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n",	// 使用标准的redis协议封装
                 dictid_len, llstr));
         }
 
@@ -567,8 +567,8 @@ int masterTryPartialResynchronization(client *c) {
 
     /* We still have the data our slave is asking for? */
     if (!server.repl_backlog ||
-        psync_offset < server.repl_backlog_off ||
-        psync_offset > (server.repl_backlog_off + server.repl_backlog_histlen))
+        psync_offset < server.repl_backlog_off ||	// 偏移量小于
+        psync_offset > (server.repl_backlog_off + server.repl_backlog_histlen))	// 偏移量超过repl_backlog_off+repl_backlog_histlen，说明此时偏移量不对，需要全同步
     {
         serverLog(LL_NOTICE,
             "Unable to partial resync with replica %s for lack of backlog (Replica request was: %lld).", replicationGetSlaveName(c), psync_offset);
@@ -591,11 +591,13 @@ int masterTryPartialResynchronization(client *c) {
     /* We can't use the connection buffers since they are used to accumulate
      * new commands at this stage. But we are sure the socket send buffer is
      * empty so this write will never fail actually. */
+     // 此时发送 CONTINUE 
     if (c->slave_capa & SLAVE_CAPA_PSYNC2) {
         buflen = snprintf(buf,sizeof(buf),"+CONTINUE %s\r\n", server.replid);
     } else {
         buflen = snprintf(buf,sizeof(buf),"+CONTINUE\r\n");
     }
+	 //将CONTINUE数据所在buf写入到conn写事件 
     if (connWrite(c->conn,buf,buflen) != buflen) {
         freeClientAsync(c);
         return C_OK;
@@ -658,9 +660,9 @@ int startBgsaveForReplication(int mincapa) {
     /* Only do rdbSave* when rsiptr is not NULL,
      * otherwise slave will miss repl-stream-db. */
     if (rsiptr) {
-        if (socket_target)
+        if (socket_target)	// 使用socket形式
             retval = rdbSaveToSlavesSockets(rsiptr);
-        else
+        else	// 使用file文件形式
             retval = rdbSaveBackground(server.rdb_filename,rsiptr);
     } else {
         serverLog(LL_WARNING,"BGSAVE for replication: replication information not available, can't generate the RDB file right now. Try later.");
@@ -1541,6 +1543,7 @@ void disklessLoadDiscardBackup(dbBackup *buckup, int flag) {
 }
 
 /* Asynchronously read the SYNC payload we receive from a master */
+// 异步读取我们从master接收到的sync有效负载
 #define REPL_MAX_WRITTEN_BEFORE_FSYNC (1024*1024*8) /* 8 MB */
 void readSyncBulkPayload(connection *conn) {
     char buf[PROTO_IOBUF_LEN];
@@ -1560,13 +1563,14 @@ void readSyncBulkPayload(connection *conn) {
     /* If repl_transfer_size == -1 we still have to read the bulk length
      * from the master reply. */
     if (server.repl_transfer_size == -1) {
+		// 读数据从conn读取到buf上
         if (connSyncReadLine(conn,buf,1024,server.repl_syncio_timeout*1000) == -1) {
             serverLog(LL_WARNING,
                 "I/O error reading bulk count from MASTER: %s",
                 strerror(errno));
             goto error;
         }
-
+		// 检查buf的第一个字符是啥
         if (buf[0] == '-') {
             serverLog(LL_WARNING,
                 "MASTER aborted replication with an error: %s",
@@ -1578,11 +1582,12 @@ void readSyncBulkPayload(connection *conn) {
              * timestamp. */
             server.repl_transfer_lastio = server.unixtime;
             return;
-        } else if (buf[0] != '$') {
+        } else if (buf[0] != '$') {	
+			// redis 协议的第一个字符一定是$
             serverLog(LL_WARNING,"Bad protocol from MASTER, the first byte is not '$' (we received '%s'), are you sure the host and port are right?", buf);
             goto error;
         }
-
+		
         /* There are two possible forms for the bulk payload. One is the
          * usual $<count> bulk format. The other is used for diskless transfers
          * when the master does not know beforehand the size of the file to
@@ -1740,7 +1745,7 @@ void readSyncBulkPayload(connection *conn) {
      * handler, otherwise it will get called recursively since
      * rdbLoad() will call the event loop to process events from time to
      * time for non blocking loading. */
-    connSetReadHandler(conn, NULL);
+    connSetReadHandler(conn, NULL);	
     serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Loading DB in memory");
     rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
     if (use_diskless_load) {
@@ -1752,7 +1757,7 @@ void readSyncBulkPayload(connection *conn) {
         connBlock(conn);
         connRecvTimeout(conn, server.repl_timeout*1000);
         startLoading(server.repl_transfer_size, RDBFLAGS_REPLICATION);
-
+		// 使用BIO全部从master接收完数据
         if (rdbLoadRio(&rdb,RDBFLAGS_REPLICATION,&rsi) != C_OK) {
             /* RDB loading failed. */
             stopLoading(0);
@@ -2072,15 +2077,15 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
          * right value, so that this information will be propagated to the
          * client structure representing the master into server.master. */
         server.master_initial_offset = -1;
-
+		// 如果此时追随过master
         if (server.cached_master) {
             psync_replid = server.cached_master->replid;
             snprintf(psync_offset,sizeof(psync_offset),"%lld", server.cached_master->reploff+1);
             serverLog(LL_NOTICE,"Trying a partial resynchronization (request %s:%s).", psync_replid, psync_offset);
-        } else {
+        } else {	// 此时不知道是那个master，从刚启动。
             serverLog(LL_NOTICE,"Partial resynchronization not possible (no cached master)");
-            psync_replid = "?";
-            memcpy(psync_offset,"-1",3);
+            psync_replid = "?";				// psync_replid为?
+            memcpy(psync_offset,"-1",3);	// 此时psync_offset为-1.
         }
 
         /* Issue the PSYNC command, if this is a master with a failover in
@@ -2474,6 +2479,7 @@ void syncWithMaster(connection *conn) {
      * already populated. */
     if (psync_result == PSYNC_NOT_SUPPORTED) {
         serverLog(LL_NOTICE,"Retrying with SYNC...");
+		// 先将数据放到buf，等待有Event Loop等待循环到，发现有写事件，才发送
         if (connSyncWrite(conn,"SYNC\r\n",6,server.repl_syncio_timeout*1000) == -1) {
             serverLog(LL_WARNING,"I/O error writing to MASTER: %s",
                 strerror(errno));
@@ -2481,8 +2487,9 @@ void syncWithMaster(connection *conn) {
         }
     }
 
+	// 2种传输方式， socket 和 file
     /* Prepare a suitable temp file for bulk transfer */
-    if (!useDisklessLoad()) {
+    if (!useDisklessLoad()) {	  // 此时需要准备一个临时文件来传输
         while(maxtries--) {
             snprintf(tmpfile,256,
                 "temp-%d.%ld.rdb",(int)server.unixtime,(long int)getpid());
@@ -2499,7 +2506,7 @@ void syncWithMaster(connection *conn) {
     }
 
     /* Setup the non blocking download of the bulk file. */
-    if (connSetReadHandler(conn, readSyncBulkPayload)
+    if (connSetReadHandler(conn, readSyncBulkPayload)	// io函数：readSyncBulkPayload
             == C_ERR)
     {
         char conninfo[CONN_INFO_LEN];
@@ -2997,7 +3004,7 @@ void replicationResurrectCachedMaster(connection *conn) {
     server.master->flags &= ~(CLIENT_CLOSE_AFTER_REPLY|CLIENT_CLOSE_ASAP);
     server.master->authenticated = 1;
     server.master->lastinteraction = server.unixtime;
-    server.repl_state = REPL_STATE_CONNECTED;
+    server.repl_state = REPL_STATE_CONNECTED;	// 更新状态
     server.repl_down_since = 0;
 
     /* Fire the master link modules event. */

@@ -722,7 +722,2995 @@ unsigned char *ziplistIndex(unsigned char *zl, int index) {
 
 7.5、hash：散列
 
+redis核心方法之aeProcessEvents
+
+```c
+/* Process every pending time event, then every pending file event
+ * (that may be registered by time event callbacks just processed).
+ * Without special flags the function sleeps until some file event
+ * fires, or when the next time event occurs (if any).
+ *
+ * If flags is 0, the function does nothing and returns.
+ * if flags has AE_ALL_EVENTS set, all the kind of events are processed.
+ * if flags has AE_FILE_EVENTS set, file events are processed.
+ * if flags has AE_TIME_EVENTS set, time events are processed.
+ * if flags has AE_DONT_WAIT set the function returns ASAP until all
+ * the events that's possible to process without to wait are processed.
+ * if flags has AE_CALL_AFTER_SLEEP set, the aftersleep callback is called.
+ * if flags has AE_CALL_BEFORE_SLEEP set, the beforesleep callback is called.
+ *
+ * The function returns the number of events processed. */
+int aeProcessEvents(aeEventLoop *eventLoop, int flags)
+{
+    int processed = 0, numevents;
+
+    /* Nothing to do? return ASAP */
+    if (!(flags & AE_TIME_EVENTS) && !(flags & AE_FILE_EVENTS)) return 0;
+
+    /* Note that we want to call select() even if there are no
+     * file events to process as long as we want to process time
+     * events, in order to sleep until the next time event is ready
+     * to fire. */
+    if (eventLoop->maxfd != -1 ||
+        ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {
+        int j;
+        struct timeval tv, *tvp;
+        int64_t usUntilTimer = -1;
+
+        if (flags & AE_TIME_EVENTS && !(flags & AE_DONT_WAIT))
+            usUntilTimer = usUntilEarliestTimer(eventLoop);
+
+        if (usUntilTimer >= 0) {
+            tv.tv_sec = usUntilTimer / 1000000;
+            tv.tv_usec = usUntilTimer % 1000000;
+            tvp = &tv;
+        } else {
+            /* If we have to check for events but need to return
+             * ASAP because of AE_DONT_WAIT we need to set the timeout
+             * to zero */
+            if (flags & AE_DONT_WAIT) {
+                tv.tv_sec = tv.tv_usec = 0;
+                tvp = &tv;
+            } else {
+                /* Otherwise we can block */
+                tvp = NULL; /* wait forever */
+            }
+        }
+
+        if (eventLoop->flags & AE_DONT_WAIT) {
+            tv.tv_sec = tv.tv_usec = 0;
+            tvp = &tv;
+        }
+
+        if (eventLoop->beforesleep != NULL && flags & AE_CALL_BEFORE_SLEEP)
+            eventLoop->beforesleep(eventLoop);
+
+        /* Call the multiplexing API, will return only on timeout or when
+         * some event fires. */
+         // 调用底层API获取事件数(如果是linux一般就是epoll多路复用器的事件)
+        numevents = aeApiPoll(eventLoop, tvp);
+
+        /* After sleep callback. */
+        if (eventLoop->aftersleep != NULL && flags & AE_CALL_AFTER_SLEEP)
+            eventLoop->aftersleep(eventLoop);
+		// 根据事件集，执行
+        for (j = 0; j < numevents; j++) {
+            aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
+            int mask = eventLoop->fired[j].mask;
+            int fd = eventLoop->fired[j].fd; //拿到需要触发的fd
+            int fired = 0; /* Number of events fired for current fd. */
+
+            /* Normally we execute the readable event first, and the writable
+             * event later. This is useful as sometimes we may be able
+             * to serve the reply of a query immediately after processing the
+             * query.
+             *
+             * However if AE_BARRIER is set in the mask, our application is
+             * asking us to do the reverse: never fire the writable event
+             * after the readable. In such a case, we invert the calls.
+             * This is useful when, for instance, we want to do things
+             * in the beforeSleep() hook, like fsyncing a file to disk,
+             * before replying to a client. */
+            // AE_BARRIER 壁垒状态，用来将文件同步到磁盘，在readable状态之后，不触发写事件，
+            int invert = fe->mask & AE_BARRIER;
+
+            /* Note the "fe->mask & mask & ..." code: maybe an already
+             * processed event removed an element that fired and we still
+             * didn't processed, so we check if the event is still valid.
+             *
+             * Fire the readable event if the call sequence is not inverted.
+             *  
+             *  */
+            if (!invert && fe->mask & mask & AE_READABLE) {
+                // 执行read IO 回调方法，在初始化的时候设置进去的函数(readQueryFromClient)
+                fe->rfileProc(eventLoop,fd,fe->clientData,mask);
+                fired++;
+                fe = &eventLoop->events[fd]; /* Refresh in case of resize. */
+            }
+
+            /* Fire the writable event. */
+            if (fe->mask & mask & AE_WRITABLE) {
+                if (!fired || fe->wfileProc != fe->rfileProc) {
+                    fe->wfileProc(eventLoop,fd,fe->clientData,mask);
+                    fired++;
+                }
+            }
+
+            /* If we have to invert the call, fire the readable event now
+             * after the writable one. */
+            if (invert) {
+                fe = &eventLoop->events[fd]; /* Refresh in case of resize. */
+                if ((fe->mask & mask & AE_READABLE) &&
+                    (!fired || fe->wfileProc != fe->rfileProc))
+                {
+                    fe->rfileProc(eventLoop,fd,fe->clientData,mask);
+                    fired++;
+                }
+            }
+
+            processed++;
+        }
+    }
+    /* Check time events */
+    // 上面for循环处理得是epoll得IO事件，会将读到得数据放到buffer中，这里处理buffer得数据，最后将处理结果返回到客户端得操作。
+    if (flags & AE_TIME_EVENTS)
+        processed += processTimeEvents(eventLoop);
+
+    return processed; /* return the number of processed file/time events */
+}
+
+```
+
+
+
+redis执行eventLoop流程
+
+1. 读到数据
+2. 操作db
+3. aof操作
+4. 写客户端
+
+## 8、redis定时任务
+
+定时任务方法：serverCron，该方法默认是每秒执行
+
+```c
+/* This is our timer interrupt, called server.hz times per second.
+ * Here is where we do a number of things that need to be done asynchronously.
+ * For instance:
+ *
+ * - Active expired keys collection (it is also performed in a lazy way on	// 过期时间处理
+ *   lookup).
+ * - Software watchdog.														// 看门狗
+ * - Update some statistic.													// 更新数据
+ * - Incremental rehashing of the DBs hash tables.							// reHash
+ * - Triggering BGSAVE / AOF rewrite, and handling of terminated children.	// AOF/触发BGSAVE
+ * - Clients timeout of different kinds.									// 客户端超时
+ * - Replication reconnection.												// 主从连接
+ * - Many more...
+ *
+ * Everything directly called here will be called server.hz times per second,
+ * so in order to throttle execution of things we want to do less frequently
+ * a macro is used: run_with_period(milliseconds) { .... }
+ */
+// 每秒执行的定时任务
+int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
+    int j;
+
+    /* Software watchdog: deliver the SIGALRM that will reach the signal
+     * handler if we don't return here fast enough. */
+    if (server.watchdog_period) watchdogScheduleSignal(server.watchdog_period);
+
+    /* Update the time cache. */
+    updateCachedTime(1);
+
+    server.hz = server.config_hz;
+    /* Adapt the server.hz value to the number of configured clients. If we have
+     * many clients, we want to call serverCron() with an higher frequency. */
+    if (server.dynamic_hz) {
+        while (listLength(server.clients) / server.hz >
+               MAX_CLIENTS_PER_CLOCK_TICK)
+        {
+            server.hz *= 2;
+            if (server.hz > CONFIG_MAX_HZ) {
+                server.hz = CONFIG_MAX_HZ;
+                break;
+            }
+        }
+    }
+
+    run_with_period(100) {
+        long long stat_net_input_bytes, stat_net_output_bytes;
+        atomicGet(server.stat_net_input_bytes, stat_net_input_bytes);
+        atomicGet(server.stat_net_output_bytes, stat_net_output_bytes);
+
+        trackInstantaneousMetric(STATS_METRIC_COMMAND,server.stat_numcommands);
+        trackInstantaneousMetric(STATS_METRIC_NET_INPUT,
+                stat_net_input_bytes);
+        trackInstantaneousMetric(STATS_METRIC_NET_OUTPUT,
+                stat_net_output_bytes);
+    }
+
+    /* We have just LRU_BITS bits per object for LRU information.
+     * So we use an (eventually wrapping) LRU clock.
+     *
+     * Note that even if the counter wraps it's not a big problem,
+     * everything will still work but some object will appear younger
+     * to Redis. However for this to happen a given object should never be
+     * touched for all the time needed to the counter to wrap, which is
+     * not likely.
+     *
+     * Note that you can change the resolution altering the
+     * LRU_CLOCK_RESOLUTION define. */
+    unsigned int lruclock = getLRUClock();
+    atomicSet(server.lruclock,lruclock);
+
+    cronUpdateMemoryStats();
+
+    /* We received a SIGTERM, shutting down here in a safe way, as it is
+     * not ok doing so inside the signal handler. */
+    if (server.shutdown_asap) {
+        if (prepareForShutdown(SHUTDOWN_NOFLAGS) == C_OK) exit(0);
+        serverLog(LL_WARNING,"SIGTERM received but errors trying to shut down the server, check the logs for more information");
+        server.shutdown_asap = 0;
+    }
+
+    /* Show some info about non-empty databases */
+    if (server.verbosity <= LL_VERBOSE) {
+        run_with_period(5000) {
+            for (j = 0; j < server.dbnum; j++) {
+                long long size, used, vkeys;
+
+                size = dictSlots(server.db[j].dict);
+                used = dictSize(server.db[j].dict);
+                vkeys = dictSize(server.db[j].expires);
+                if (used || vkeys) {
+                    serverLog(LL_VERBOSE,"DB %d: %lld keys (%lld volatile) in %lld slots HT.",j,used,vkeys,size);
+                }
+            }
+        }
+    }
+
+    /* Show information about connected clients */
+    if (!server.sentinel_mode) {
+        run_with_period(5000) {
+            serverLog(LL_DEBUG,
+                "%lu clients connected (%lu replicas), %zu bytes in use",
+                listLength(server.clients)-listLength(server.slaves),
+                listLength(server.slaves),
+                zmalloc_used_memory());
+        }
+    }
+
+    /* We need to do a few operations on clients asynchronously. */
+    clientsCron();
+
+    /* Handle background operations on Redis databases. */
+	// 后台进程操作数据，包括key过期，resize，和rehash
+    databasesCron();
+
+    /* Start a scheduled AOF rewrite if this was requested by the user while
+     * a BGSAVE was in progress. */
+    if (!hasActiveChildProcess() &&
+        server.aof_rewrite_scheduled)
+    {
+        rewriteAppendOnlyFileBackground();	// 创建子进程进行数据的后台处理
+    }
+
+    /* Check if a background saving or AOF rewrite in progress terminated. */
+    if (hasActiveChildProcess() || ldbPendingChildren())
+    {
+        run_with_period(1000) receiveChildInfo();
+        checkChildrenDone();		// 子进程处理完毕之后的一些操作
+    } else {
+        /* If there is not a background saving/rewrite in progress check if
+         * we have to save/rewrite now. */
+        for (j = 0; j < server.saveparamslen; j++) {
+            struct saveparam *sp = server.saveparams+j;
+
+            /* Save if we reached the given amount of changes,
+             * the given amount of seconds, and if the latest bgsave was
+             * successful or if, in case of an error, at least
+             * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
+            if (server.dirty >= sp->changes &&
+                server.unixtime-server.lastsave > sp->seconds &&
+                (server.unixtime-server.lastbgsave_try >
+                 CONFIG_BGSAVE_RETRY_DELAY ||
+                 server.lastbgsave_status == C_OK))
+            {
+                serverLog(LL_NOTICE,"%d changes in %d seconds. Saving...",
+                    sp->changes, (int)sp->seconds);
+                rdbSaveInfo rsi, *rsiptr;
+                rsiptr = rdbPopulateSaveInfo(&rsi);
+                rdbSaveBackground(server.rdb_filename,rsiptr);
+                break;
+            }
+        }
+
+        /* Trigger an AOF rewrite if needed. */
+        if (server.aof_state == AOF_ON &&
+            !hasActiveChildProcess() &&
+            server.aof_rewrite_perc &&
+            server.aof_current_size > server.aof_rewrite_min_size)
+        {
+            long long base = server.aof_rewrite_base_size ?
+                server.aof_rewrite_base_size : 1;
+            long long growth = (server.aof_current_size*100/base) - 100;
+            if (growth >= server.aof_rewrite_perc) {
+                serverLog(LL_NOTICE,"Starting automatic rewriting of AOF on %lld%% growth",growth);
+                rewriteAppendOnlyFileBackground();
+            }
+        }
+    }
+    /* Just for the sake of defensive programming, to avoid forgeting to
+     * call this function when need. */
+    updateDictResizePolicy();
+
+
+    /* AOF postponed flush: Try at every cron cycle if the slow fsync
+     * completed. */
+    if (server.aof_state == AOF_ON && server.aof_flush_postponed_start)
+        flushAppendOnlyFile(0);
+
+    /* AOF write errors: in this case we have a buffer to flush as well and
+     * clear the AOF error in case of success to make the DB writable again,
+     * however to try every second is enough in case of 'hz' is set to
+     * a higher frequency. */
+    run_with_period(1000) {
+        if (server.aof_state == AOF_ON && server.aof_last_write_status == C_ERR)
+            flushAppendOnlyFile(0);		// 刷盘
+    }
+
+    /* Clear the paused clients state if needed. */
+    checkClientPauseTimeoutAndReturnIfPaused();
+
+    /* Replication cron function -- used to reconnect to master,
+     * detect transfer failures, start background RDB transfers and so forth. 
+     * 
+     * If Redis is trying to failover then run the replication cron faster so
+     * progress on the handshake happens more quickly. */
+    if (server.failover_state != NO_FAILOVER) {
+        run_with_period(100) replicationCron();
+    } else {
+        run_with_period(1000) replicationCron();
+    }
+
+    /* Run the Redis Cluster cron. */
+    run_with_period(100) {
+        if (server.cluster_enabled) clusterCron();
+    }
+
+    /* Run the Sentinel timer if we are in sentinel mode. */
+    if (server.sentinel_mode) sentinelTimer();
+
+    /* Cleanup expired MIGRATE cached sockets. */
+    run_with_period(1000) {
+        migrateCloseTimedoutSockets();
+    }
+
+    /* Stop the I/O threads if we don't have enough pending work. */
+    stopThreadedIOIfNeeded();
+
+    /* Resize tracking keys table if needed. This is also done at every
+     * command execution, but we want to be sure that if the last command
+     * executed changes the value via CONFIG SET, the server will perform
+     * the operation even if completely idle. */
+    if (server.tracking_clients) trackingLimitUsedSlots();
+
+    /* Start a scheduled BGSAVE if the corresponding flag is set. This is
+     * useful when we are forced to postpone a BGSAVE because an AOF
+     * rewrite is in progress.
+     *
+     * Note: this code must be after the replicationCron() call above so
+     * make sure when refactoring this file to keep this order. This is useful
+     * because we want to give priority to RDB savings for replication. */
+    if (!hasActiveChildProcess() &&
+        server.rdb_bgsave_scheduled &&
+        (server.unixtime-server.lastbgsave_try > CONFIG_BGSAVE_RETRY_DELAY ||
+         server.lastbgsave_status == C_OK))
+    {
+        rdbSaveInfo rsi, *rsiptr;
+        rsiptr = rdbPopulateSaveInfo(&rsi);
+        if (rdbSaveBackground(server.rdb_filename,rsiptr) == C_OK)
+            server.rdb_bgsave_scheduled = 0;
+    }
+
+    /* Fire the cron loop modules event. */
+    RedisModuleCronLoopV1 ei = {REDISMODULE_CRON_LOOP_VERSION,server.hz};
+    moduleFireServerEvent(REDISMODULE_EVENT_CRON_LOOP,c
+                          0,
+                          &ei);
+
+    server.cronloops++;
+    return 1000/server.hz;
+}
+```
+
+
+
+> redis定时任务做了啥？
+>
+> 1. 客户端得处理
+> 2. db过期key，resize，rehash
+> 3. bgrdb，可以手动触发cmd命令得bgsave
+> 4. bgrewriteaof，也可以手动触发，bgrewriteaof
+> 5. 前台刷写aof
+
+## 9、AOF
+
+### 9.1、redis之AOF调用流程：
+
+1、**定时任务中执行调用**
+
+2、**执行客户端cmd命令时记录命令操作（每秒执行/每操作）**
+
+> 调用流程：
+>
+> 1. readQueryFromClient，方法
+> 2. processInputBuffer，执行输出buffer中的命令
+> 3. processCommandAndResetClient，执行命令，并重置client
+> 4. processCommand(c)，执行，会调用execCommand，或者call
+> 5.  call(c,CMD_CALL_FULL);redis 执行命令核心函数
+> 6. propagate(c->cmd,c->db->id,c->argv,c->argc,propagate_flags)，执行aof操作
+> 7. feedAppendOnlyFile(cmd,dbid,argv,argc); 添加命令到aof文件中
+> 8. 调用aofRewriteBufferAppend方法将命令添加到aof_buff的尾部
+> 9. aofChildWriteDiffData，主进程写数据给到child子进程监听的fds
+
+3、**cmd命令直接调用，bgsave/bgrewriteaof命令**
+
+### 9.2、定时任务serverCron
+
+#### 9.2.1、rewriteAppendOnlyFileBackground
+
+该方法是以上三个调用被执行执行的，其执行流程如下：
+
+1. hasActiveChildProcess，检查已经有子进程再执行，如果有，那么直接返回err
+
+2. aofCreatePipes创建pipe，用于主进程将aof增量数据给到子进程，让子进程去写aof
+
+3. redisFork，创建pipe成功之后，开始fork用于aof的子进程
+
+4. redisFork成功，如果返回0，代表是子进程，否则就是父进程。返回-1代表fork失败
+
+   1. 如果0，执行子进程
+
+      1. redisSetProcTitle，设置child子进程的执行名称
+      2. 设置cpu亲密度，将进程运行在绑定的cpu上，防止cpu迁移带来的损耗，提高执行效率
+      3. rewriteAppendOnlyFile，子进程执行aof的实际调用方法，后面继续研究
+      4. sendChildInfoGeneric，子进程写成功，发送数据保存给父进程
+      5. 写parent成功，子进程正常退出
+      6. 子进程执行aof执行失败，子进程异常退出
+
+   2. 如果1，执行父进程
+
+      1. 检查子进程pid，为-1，异常状态，输出日志，关闭pipe
+
+      2. 输出父进程执行aof日志，
+
+      3. server.aof_selected_db = -1
+
+         > 我们将appendseldb设置为-1，以便强制对feedAppendOnlyFile()的下一次调用发出一个SELECT命令，因此父进程积累的差异将被写入服务器。 aof_rewrite_buf将以SELECT语句开始，这样可以安全合并。 
+
+      4. replicationScriptCacheFlush，复制脚本刷新缓存？
+
+5. 最后执行成功，返回C_OK
+
+```c
+/* ----------------------------------------------------------------------------
+ * AOF background rewrite
+ * ------------------------------------------------------------------------- */
+
+/* This is how rewriting of the append only file in background works:
+ *
+ * 1) The user calls BGREWRITEAOF
+ * 2) Redis calls this function, that forks():
+ *    2a) the child rewrite the append only file in a temp file.
+ *    2b) the parent accumulates differences in server.aof_rewrite_buf.
+ * 3) When the child finished '2a' exists.
+ * 4) The parent will trap the exit code, if it's OK, will append the
+ *    data accumulated into server.aof_rewrite_buf into the temp file, and
+ *    finally will rename(2) the temp file in the actual file name.
+ *    The the new file is reopened as the new append only file. Profit!
+ */
+ // 1.定时任务调用
+ // 2.startAppendOnly处调用
+ // 3.bgrewriteaofCommand处调用
+int rewriteAppendOnlyFileBackground(void) {
+    pid_t childpid;
+
+    if (hasActiveChildProcess()) return C_ERR;
+    if (aofCreatePipes() != C_OK) return C_ERR;
+	// 如果是父进程，那么就拿到pid
+	// 如果是子进程，那么返回0，用来确定当前进程是parent还是child
+    if ((childpid = redisFork(CHILD_TYPE_AOF)) == 0) {		// 主进程，fork出子进程。父进程拿到子进程得pid
+        char tmpfile[256];
+
+        /* Child */	
+        redisSetProcTitle("redis-aof-rewrite");						// 设置子进程的title
+        redisSetCpuAffinity(server.aof_rewrite_cpulist);			// 设置cpu亲密度
+        snprintf(tmpfile,256,"temp-rewriteaof-bg-%d.aof", (int) getpid());
+        if (rewriteAppendOnlyFile(tmpfile) == C_OK) {
+            sendChildCowInfo(CHILD_INFO_TYPE_AOF_COW_SIZE, "AOF rewrite");
+            exitFromChild(0);	// 子进程发送！，parent返回！，此时结束请求，正确退出子进程
+        } else {
+            exitFromChild(1);
+        }
+    } else {
+        /* Parent */
+        if (childpid == -1) {
+            serverLog(LL_WARNING,
+                "Can't rewrite append only file in background: fork: %s",
+                strerror(errno));
+            aofClosePipes();
+            return C_ERR;
+        }
+        serverLog(LL_NOTICE,
+            "Background append only file rewriting started by pid %ld",(long) childpid);
+        server.aof_rewrite_scheduled = 0;
+        server.aof_rewrite_time_start = time(NULL);
+
+        /* We set appendseldb to -1 in order to force the next call to the
+         * feedAppendOnlyFile() to issue a SELECT command, so the differences
+         * accumulated by the parent into server.aof_rewrite_buf will start
+         * with a SELECT statement and it will be safe to merge. */
+        server.aof_selected_db = -1;
+        replicationScriptCacheFlush();
+        return C_OK;
+    }
+    return C_OK; /* unreached */
+}
+```
+
+#### 9.2.2、aofCreatePipes
+
+补充：
+
+> linux下pipe管道默认是65535个字节来传输数据，大概是64M大小。
+>
+> 在redis中，默认使用block块大小是AOF_RW_BUF_BLOCK_SIZE=10MB
+
+aofCreatePipes调用流程：
+
+1. pipe(fds)，pipe(fds+2)，pipe(fds+4)，将管道跟文件描述符绑定，
+2. anetNonBlock，设置非阻塞状态
+3. 创建aeEventLoop事件，将fds[2]代表从child读取ack的回调事件，绑定方法aofChildPipeReadable
+4. 设置server全局的fds文件描述符，等待子进程执行的时候可以正确拿到fds
+5. 如果这个方法的任意过程发送错误，那么就关闭fds，返回error
+
+```c
+/* Create the pipes used for parent - child process IPC during rewrite.
+ * We have a data pipe used to send AOF incremental diffs to the child,
+ * and two other pipes used by the children to signal it finished with
+ * the rewrite so no more data should be written, and another for the
+ * parent to acknowledge it understood this new condition. */
+int aofCreatePipes(void) {
+    int fds[6] = {-1, -1, -1, -1, -1, -1};
+    int j;
+
+    if (pipe(fds) == -1) goto error; /* parent -> children data. */
+    if (pipe(fds+2) == -1) goto error; /* children -> parent ack. */
+    if (pipe(fds+4) == -1) goto error; /* parent -> children ack. */
+    /* Parent -> children data is non blocking. */
+    if (anetNonBlock(NULL,fds[0]) != ANET_OK) goto error;
+    if (anetNonBlock(NULL,fds[1]) != ANET_OK) goto error;
+	// 给文件描述符fds[2](从child读取到ack的回调事件)上绑定，aofChildPipeReadable处理回调事件
+    if (aeCreateFileEvent(server.el, fds[2], AE_READABLE, aofChildPipeReadable, NULL) == AE_ERR) goto error;
+
+    server.aof_pipe_write_data_to_child = fds[1];
+    server.aof_pipe_read_data_from_parent = fds[0];
+    server.aof_pipe_write_ack_to_parent = fds[3];
+    server.aof_pipe_read_ack_from_child = fds[2];
+    server.aof_pipe_write_ack_to_child = fds[5];
+    server.aof_pipe_read_ack_from_parent = fds[4];
+    server.aof_stop_sending_diff = 0;
+    return C_OK;
+
+error:
+    serverLog(LL_WARNING,"Error opening /setting AOF rewrite IPC pipes: %s",
+        strerror(errno));
+    for (j = 0; j < 6; j++) if(fds[j] != -1) close(fds[j]);
+    return C_ERR;
+}
+```
+
+#### 9.2.3、aofChildPipeReadable
+
+该方法是绑定到fds[2]文件描述符上的回调事件,用于主进程接收child的停止发送diffs数据的通知,并发送同意停止发送数据的通知给子进程.
+
+**方法含义:**当AOF重写的子进程发送一个 `!`表示，父进程需要停止给子进程发送buffer数据，父进程也发送`!`表示同意子进程的请求，子进程正常重新aof文件名，正常退出.
+
+**调用流程:**
+
+1. read，读数据从绑定的fds上,读取到byte上,如果读取到`!`,说明子进程需要退出
+2. 输出给子进程停止发送diffs数据的日志
+3. server.aof_stop_sending_diff = 1;设置状态,停止给child发送数据
+4. write(server.aof_pipe_write_ack_to_child,"!",1) ,父进程回复child数据`!`,表示同意子进程的请求
+5. aeDeleteFileEvent,删除全局的从child读取ack的事件.因此此时子进程要退出了,该事件已经不需要了
+
+```c
+/* ----------------------------------------------------------------------------
+ * AOF rewrite pipes for IPC
+ * -------------------------------------------------------------------------- */
+
+/* This event handler is called when the AOF rewriting child sends us a
+ * single '!' char to signal we should stop sending buffer diffs. The
+ * parent sends a '!' as well to acknowledge. */
+void aofChildPipeReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
+    char byte;
+    UNUSED(el);
+    UNUSED(privdata);
+    UNUSED(mask);
+
+	// 读取到fd上数据放到byte，! 说明是从child读到的
+    if (read(fd,&byte,1) == 1 && byte == '!') {
+        serverLog(LL_NOTICE,"AOF rewrite child asks to stop sending diffs.");
+        server.aof_stop_sending_diff = 1;	// 设置状态为1，停止给child发送数据
+        if (write(server.aof_pipe_write_ack_to_child,"!",1) != 1) {	// 回复child数据!
+            /* If we can't send the ack, inform the user, but don't try again
+             * since in the other side the children will use a timeout if the
+             * kernel can't buffer our write, or, the children was
+             * terminated. */
+            serverLog(LL_WARNING,"Can't send ACK to AOF child: %s",
+                strerror(errno));
+        }
+    }
+    /* Remove the handler since this can be called only one time during a
+     * rewrite. */
+    aeDeleteFileEvent(server.el,server.aof_pipe_read_ack_from_child,AE_READABLE);
+}
+```
+
+#### 9.2.4、redisFork(purpose)
+
+方法作用:用于fork出purpose类型的子进程
+
+方法执行流程:
+
+1. 检查purpose状态,没有问题
+
+2. openChildInfoPipe,打开child-parent的管道,用于发送信息从child到parent
+
+3. childpid = fork(),系统调用,如果为0,说明是子进程
+
+   1.  server.in_fork_child = purpose;  设置子进程类型
+   2. setOOMScoreAdj
+   3. setupChildSignalHandlers  设置
+   4. closeChildUnusedResourceAfterFork , fork之后，子进程将继承父进程的资源，例如fd(socket或flock)等应该关闭子进程未使用的资源， 因此，如果父进程重启，它可以绑定/锁，尽管子进程可能还在运行  
+
+4. 否则就是parent父进程
+
+   1. 设置一些基本参数
+   2. latencyAddSampleIfNeeded, 记录fork方法是否是具有延迟的操作
+   3. childpid == -1. fork失败,关闭pipe
+   4. 再次检查purpose状态, 没有问题,设置全局的基本属性
+
+5. updateDictResizePolicy
+
+   > 一旦某个后台进程终止，这个函数就会被调用，因为我们想要避免在有子进程时调整哈希表的大小，以便更好地进行写时复制(否则当调整大小发生时，会复制大量内存页面)。 这个函数的目标是更新dict.c的功能，根据我们有一个活动的fork子进程在运行的事实来调整哈希表的大小。  
+
+6. moduleFireServerEvent
+
+   > 每当我们想要触发一个可以被某些模块拦截的事件时，Redis内部就会调用这个函数。 指针'data'在需要时用来填充特定于事件的结构，以便将包含更多信息的结构返回给回调函数。  
+
+```c
+/* purpose is one of CHILD_TYPE_ types */
+int redisFork(int purpose) {
+    if (isMutuallyExclusiveChildType(purpose)) {
+        if (hasActiveChildProcess())
+            return -1;
+
+        openChildInfoPipe();
+    }
+
+    int childpid;
+    long long start = ustime();
+    if ((childpid = fork()) == 0) {	// 系统调用 fork函数
+        /* Child */
+        server.in_fork_child = purpose;
+        setOOMScoreAdj(CONFIG_OOM_BGCHILD);
+        setupChildSignalHandlers();
+        closeChildUnusedResourceAfterFork();
+    } else {
+        /* Parent */
+        server.stat_total_forks++;
+        server.stat_fork_time = ustime()-start;
+        server.stat_fork_rate = (double) zmalloc_used_memory() * 1000000 / server.stat_fork_time / (1024*1024*1024); /* GB per second. */
+        latencyAddSampleIfNeeded("fork",server.stat_fork_time/1000);
+        if (childpid == -1) {	// -1说明fork失败。那么关闭pipe
+            if (isMutuallyExclusiveChildType(purpose)) closeChildInfoPipe();
+            return -1;
+        }
+
+        /* The child_pid and child_type are only for mutual exclusive children.
+         * other child types should handle and store their pid's in dedicated variables.
+         *
+         * Today, we allows CHILD_TYPE_LDB to run in parallel with the other fork types:
+         * - it isn't used for production, so it will not make the server be less efficient
+         * - used for debugging, and we don't want to block it from running while other
+         *   forks are running (like RDB and AOF) */
+        if (isMutuallyExclusiveChildType(purpose)) {
+            server.child_pid = childpid;
+            server.child_type = purpose;
+            server.stat_current_cow_bytes = 0;
+            server.stat_current_cow_updated = 0;
+            server.stat_current_save_keys_processed = 0;
+            server.stat_module_progress = 0;
+            server.stat_current_save_keys_total = dbTotalServerKeyCount();
+        }
+
+        updateDictResizePolicy();
+        moduleFireServerEvent(REDISMODULE_EVENT_FORK_CHILD,
+                              REDISMODULE_SUBEVENT_FORK_CHILD_BORN,
+                              NULL);
+    }
+    return childpid;
+}
+```
+
+
+
+#### 9.2.5、rewriteAppendOnlyFile-AOF核心方法
+
+该方法是AOF的核心方法之一，子进程调用.
+
+**作用：**将一系列完全重建数据集的命令写入 filename。是被rewriteaof和bgrewriteaof命令调用。
+
+为了减少在重写日志中需要的命令数，redis在可能的情况下使用改变命令.入rpush,sadd和zadd. 但是在 最大命令AOF_REWRITE_ITEMS_PER_CMD时,每次使用单个命令插入
+
+**执行流程：**
+
+1. snprintf(tmpfile,256,"temp-rewriteaof-%d.aof", (int) getpid()); 设置最大256长度文件,并给临时文件命名.
+2. fp = fopen(tmpfile,"w");打开临时具有写操作的文件
+3. 打开fp失败,记录日志.直接返回
+4. server.aof_child_diff = sdsempty().创建空的sds数据,用来记录需要写入的数据
+5.   rioInitWithFile(&aof,fp);
+6. server.aof_rewrite_incremental_fsync,检查是否 aof重写增量刷盘
+   1. 如果需要，那么执行rioSetAutoSync。将需要写入tmpfile文件的bytes赋值，并写入
+7. startSaving，触发持久化模块的结束事件
+8. server.aof_use_rdb_preamble，是否开启 在aof重写时RDB的preamble
+   1. 开启，那么执行rdbSaveRio，生成RDB格式的数据库存储，将其发送到指定的Redis I/O通道。如果成功返回C_OK，否则返回失败。部分或全部输出因为I/O错误而丢失。
+   2. 未开启，执行rewriteAppendOnlyFileRio，写数据给到RIO中redis的特定IO中
+9. fflush(fp) == EOF，将数据写入到fp代表的缓存中
+10. fsync(fileno(fp))，将fp文件写入到磁盘上
+11. 再次尝试有few times 来读取更多的数据从parent。
+    1. 如果时间小于1000，且20ms内没有等到从parent那里等到新的数据，那么就退出当前子进程
+    2. aeWait，使用该方法等待从父进程中读取数据
+    3. aofReadDiffFromParent，读取差量数据从parent。并将数据放到全局属性server.aof_child_diff上
+12. 此时子进程需要退出，发送`!`给父进程
+13. anetNonBlock设置从parent读取ack为非阻塞
+14. syncRead，从文件描述符中，读取到来自父进程发来的`!`，设置其超时时间为5s钟
+15. 读到`!`,说明父进程同意子进程退出，那么开始写父进程同意自己退出的日志
+16. aofReadDiffFromParent，此时可能父进程已经发送了一丢丢数据给子进程，那么需要继续写入全局子进程属性server.aof_child_diff上
+17. 根据server.aof_child_diff计算读取到数据量，日志记录
+18. 拿到需要写的数据bytes_to_write，
+19. while写数据，因为一次可以写入8MB的数据，所以需要计算bytes_to_write的大小。
+20. 直到bytes_to_write数据为0
+21. 继续刷新数据到fp文件中，
+22. 将fp文件进行刷盘操作
+23. 关闭fp文件
+24. 最后最后，重新命令临时文件tmpfile名字为rewriteAppendOnlyFile传入的文件名
+25. 最终，日志记录sync添加aof执行完毕
+26. stopSaving(1)，触发停止持久化模块的结束事件
+
+```c
+/* Write a sequence of commands able to fully rebuild the dataset into
+ * "filename". Used both by REWRITEAOF and BGREWRITEAOF.
+ *
+ * In order to minimize the number of commands needed in the rewritten
+ * log Redis uses variadic commands when possible, such as RPUSH, SADD
+ * and ZADD. However at max AOF_REWRITE_ITEMS_PER_CMD items per time
+ * are inserted using a single command. */
+int rewriteAppendOnlyFile(char *filename) {
+    rio aof;
+    FILE *fp = NULL;
+    char tmpfile[256];
+    char byte;
+
+    /* Note that we have to use a different temp name here compared to the
+     * one used by rewriteAppendOnlyFileBackground() function. */
+    snprintf(tmpfile,256,"temp-rewriteaof-%d.aof", (int) getpid());
+    fp = fopen(tmpfile,"w");
+    if (!fp) {
+        serverLog(LL_WARNING, "Opening the temp file for AOF rewrite in rewriteAppendOnlyFile(): %s", strerror(errno));
+        return C_ERR;
+    }
+
+    server.aof_child_diff = sdsempty();
+    rioInitWithFile(&aof,fp);
+
+    if (server.aof_rewrite_incremental_fsync)
+        rioSetAutoSync(&aof,REDIS_AUTOSYNC_BYTES);
+
+    startSaving(RDBFLAGS_AOF_PREAMBLE);
+
+    if (server.aof_use_rdb_preamble) {
+        int error;
+        if (rdbSaveRio(&aof,&error,RDBFLAGS_AOF_PREAMBLE,NULL) == C_ERR) {
+            errno = error;
+            goto werr;
+        }
+    } else {
+        if (rewriteAppendOnlyFileRio(&aof) == C_ERR) goto werr;
+    }
+
+    /* Do an initial slow fsync here while the parent is still sending
+     * data, in order to make the next final fsync faster. */
+    if (fflush(fp) == EOF) goto werr;
+    if (fsync(fileno(fp)) == -1) goto werr;
+
+    /* Read again a few times to get more data from the parent.
+     * We can't read forever (the server may receive data from clients
+     * faster than it is able to send data to the child), so we try to read
+     * some more data in a loop as soon as there is a good chance more data
+     * will come. If it looks like we are wasting time, we abort (this
+     * happens after 20 ms without new data). */
+    int nodata = 0;
+    mstime_t start = mstime();
+    while(mstime()-start < 1000 && nodata < 20) {
+        if (aeWait(server.aof_pipe_read_data_from_parent, AE_READABLE, 1) <= 0)	// 等待从parent的fd中读取数据
+        {
+            nodata++;
+            continue;
+        }
+        nodata = 0; /* Start counting from zero, we stop on N *contiguous*
+                       timeouts. */
+        aofReadDiffFromParent();
+    }
+
+    /* Ask the master to stop sending diffs. */
+	// 写!数据给到parent
+    if (write(server.aof_pipe_write_ack_to_parent,"!",1) != 1) goto werr;
+    if (anetNonBlock(NULL,server.aof_pipe_read_ack_from_parent) != ANET_OK)
+        goto werr;
+    /* We read the ACK from the server using a 5 seconds timeout. Normally
+     * it should reply ASAP, but just in case we lose its reply, we are sure
+     * the child will eventually get terminated. */
+     // 从parent读取 ! ,表明收到child发送的!，说明通信成功
+    if (syncRead(server.aof_pipe_read_ack_from_parent,&byte,1,5000) != 1 ||
+        byte != '!') goto werr;
+	// 写日志，child不处理了
+    serverLog(LL_NOTICE,"Parent agreed to stop sending diffs. Finalizing AOF...");
+
+    /* Read the final diff if any. */
+	// 读取剩余可能在parent的fd上堆积的数据
+    aofReadDiffFromParent();
+
+    /* Write the received diff to the file. */
+    serverLog(LL_NOTICE,
+        "Concatenating %.2f MB of AOF diff received from parent.",
+        (double) sdslen(server.aof_child_diff) / (1024*1024));
+
+    /* Now we write the entire AOF buffer we received from the parent
+     * via the pipe during the life of this fork child.
+     * once a second, we'll take a break and send updated COW info to the parent */
+    size_t bytes_to_write = sdslen(server.aof_child_diff);
+    const char *buf = server.aof_child_diff;
+    long long cow_updated_time = mstime();
+    long long key_count = dbTotalServerKeyCount();
+    while (bytes_to_write) {
+        /* We write the AOF buffer in chunk of 8MB so that we can check the time in between them */
+        size_t chunk_size = bytes_to_write < (8<<20) ? bytes_to_write : (8<<20);
+
+        if (rioWrite(&aof,buf,chunk_size) == 0)
+            goto werr;
+
+        bytes_to_write -= chunk_size;
+        buf += chunk_size;
+
+        /* Update COW info */
+        long long now = mstime();
+        if (now - cow_updated_time >= 1000) {
+            sendChildInfo(CHILD_INFO_TYPE_CURRENT_INFO, key_count, "AOF rewrite");
+            cow_updated_time = now;
+        }
+    }
+
+    /* Make sure data will not remain on the OS's output buffers */
+    if (fflush(fp)) goto werr;
+    if (fsync(fileno(fp))) goto werr;
+    if (fclose(fp)) { fp = NULL; goto werr; }
+    fp = NULL;
+
+    /* Use RENAME to make sure the DB file is changed atomically only
+     * if the generate DB file is ok. */
+    if (rename(tmpfile,filename) == -1) {
+        serverLog(LL_WARNING,"Error moving temp append only file on the final destination: %s", strerror(errno));
+        unlink(tmpfile);
+        stopSaving(0);
+        return C_ERR;
+    }
+    serverLog(LL_NOTICE,"SYNC append only file rewrite performed");
+    stopSaving(1);
+    return C_OK;
+
+werr:
+    serverLog(LL_WARNING,"Write error writing append only file on disk: %s", strerror(errno));
+    if (fp) fclose(fp);
+    unlink(tmpfile);
+    stopSaving(0);
+    return C_ERR;
+}
+```
+
+
+
+### 9.3、readQueryFromClient
+
+#### 9.3.1、feedAppendOnlyFile
+
+作用：解析redis的cmd命令，并将其写入到全局的server.aof_buf上，然后调用aofRewriteBufferAppend方法，将aof的文件通过子进程刷写打aof上。
+
+```c
+void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
+    sds buf = sdsempty();
+    /* The DB this command was targeting is not the same as the last command
+     * we appended. To issue a SELECT command is needed. */
+    if (dictid != server.aof_selected_db) {
+        char seldb[64];
+
+        snprintf(seldb,sizeof(seldb),"%d",dictid);
+		// 默认给buf中开头添加select命令
+        buf = sdscatprintf(buf,"*2\r\n$6\r\nSELECT\r\n$%lu\r\n%s\r\n",
+            (unsigned long)strlen(seldb),seldb);
+        server.aof_selected_db = dictid;
+    }
+	// 检查命令是否是具有expire cmd
+    if (cmd->proc == expireCommand || cmd->proc == pexpireCommand ||
+        cmd->proc == expireatCommand) {
+        /* Translate EXPIRE/PEXPIRE/EXPIREAT into PEXPIREAT */
+		// 将EXPIRE/PEXPIRE/EXPIREAT都转变成PEXPIREAT
+        buf = catAppendOnlyExpireAtCommand(buf,cmd,argv[1],argv[2]);
+    } else if (cmd->proc == setCommand && argc > 3) {	// 如果是set命令，那么必须argc长度大于3，不然是不合格的
+    
+        robj *pxarg = NULL;
+        /* When SET is used with EX/PX argument setGenericCommand propagates them with PX millisecond argument.
+         * So since the command arguments are re-written there, we can rely here on the index of PX being 3. */
+        if (!strcasecmp(argv[3]->ptr, "px")) {
+            pxarg = argv[4];
+        }
+        /* For AOF we convert SET key value relative time in milliseconds to SET key value absolute time in
+         * millisecond. Whenever the condition is true it implies that original SET has been transformed
+         * to SET PX with millisecond time argument so we do not need to worry about unit here.*/
+        if (pxarg) {
+            robj *millisecond = getDecodedObject(pxarg);
+            long long when = strtoll(millisecond->ptr,NULL,10);
+            when += mstime();
+
+            decrRefCount(millisecond);
+
+            robj *newargs[5];
+            newargs[0] = argv[0];
+            newargs[1] = argv[1];
+            newargs[2] = argv[2];
+            newargs[3] = shared.pxat;
+            newargs[4] = createStringObjectFromLongLong(when);
+            buf = catAppendOnlyGenericCommand(buf,5,newargs);
+            decrRefCount(newargs[4]);
+        } else {
+            buf = catAppendOnlyGenericCommand(buf,argc,argv);
+        }
+    } else {
+        /* All the other commands don't need translation or need the
+         * same translation already operated in the command vector
+         * for the replication itself. */
+        buf = catAppendOnlyGenericCommand(buf,argc,argv);
+    }
+	// 以上操作都是获取到正确的cmd命令
+	// 这里是将命令，添加到aof的buffer上，等待下面进程去写aof文件
+	
+    /* Append to the AOF buffer. This will be flushed on disk just before
+     * of re-entering the event loop, so before the client will get a
+     * positive reply about the operation performed. */
+    if (server.aof_state == AOF_ON)
+        server.aof_buf = sdscatlen(server.aof_buf,buf,sdslen(buf));
+
+    /* If a background append only file rewriting is in progress we want to
+     * accumulate the differences between the child DB and the current one
+     * in a buffer, so that when the child process will do its work we
+     * can append the differences to the new append only file. */
+    if (server.child_type == CHILD_TYPE_AOF)
+		// 如果是开启了child的aof进程，
+        aofRewriteBufferAppend((unsigned char*)buf,sdslen(buf));
+
+    sdsfree(buf);
+}
+```
+
+#### 9.3.2、aofRewriteBufferAppend
+
+调用流程：
+
+1. listNode *ln = listLast(server.aof_rewrite_buf_blocks); 拿到全局的aofblock数据
+2. ln存在，拿到block = value，否则为null
+3. while(len)，遍历传过来的buf
+4. block存在，尝试将buf添加到block上
+5. len，如果len长度还有，那么block已经满了或为null的情况，此时需要创建新的block
+6.   listAddNodeTail(server.aof_rewrite_buf_blocks,block); 将block添加的全局的aof_rewrite_buf的尾部
+7. numblocks计算长度，写日志
+8. !server.aof_stop_sending_diff && aeGetFileEvents(server.el,server.aof_pipe_write_data_to_child) == 0，必须sending_diff中有数据，并且可以write数据到child中，那么此时才创建aof写事件
+9. aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child, AE_WRITABLE, aofChildWriteDiffData, NULL); 创建aof写数据到child事件
+
+```c
+/* Append data to the AOF rewrite buffer, allocating new blocks if needed. */
+void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
+    listNode *ln = listLast(server.aof_rewrite_buf_blocks);
+    aofrwblock *block = ln ? ln->value : NULL;	// aofblock 默认10MB大小
+
+    while(len) {
+        /* If we already got at least an allocated block, try appending
+         * at least some piece into it. */
+        if (block) {
+            unsigned long thislen = (block->free < len) ? block->free : len;
+            if (thislen) {  /* The current block is not already full. */
+                memcpy(block->buf+block->used, s, thislen);
+                block->used += thislen;
+                block->free -= thislen;
+                s += thislen;
+                len -= thislen;
+            }
+        }
+
+        if (len) { /* First block to allocate, or need another block. */
+            int numblocks;
+
+            block = zmalloc(sizeof(*block));
+            block->free = AOF_RW_BUF_BLOCK_SIZE;
+            block->used = 0;
+            listAddNodeTail(server.aof_rewrite_buf_blocks,block);
+
+            /* Log every time we cross more 10 or 100 blocks, respectively
+             * as a notice or warning. */
+            numblocks = listLength(server.aof_rewrite_buf_blocks);
+            if (((numblocks+1) % 10) == 0) {
+                int level = ((numblocks+1) % 100) == 0 ? LL_WARNING :
+                                                         LL_NOTICE;
+                serverLog(level,"Background AOF buffer size: %lu MB",
+                    aofRewriteBufferSize()/(1024*1024));
+            }
+        }
+    }
+
+    /* Install a file event to send data to the rewrite child if there is
+     * not one already. */
+    // 指的有数据了，才能注册read事件
+    if (!server.aof_stop_sending_diff &&
+        aeGetFileEvents(server.el,server.aof_pipe_write_data_to_child) == 0)
+		{
+		// 创建AOF写入事件，让子线程去异步写入到AOF文件
+        aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child,
+            AE_WRITABLE, aofChildWriteDiffData, NULL);
+    }
+}
+```
+
+#### 9.3.3、aofChildWriteDiffData
+
+上面创建aof写事件绑定的回调函数，
+
+作用：此函数是eventHandler，用来发送数据给子进程，做aof重写操作。发送我们AOF差异buffer，这样当子进程完成重写时，最终写入将会很小。
+
+调用流程：
+
+1. while(1)，死循环，直到写入buf完毕
+2. ln = listFirst(server.aof_rewrite_buf_blocks);，从aof_rewirte_buf_blocks的头部拿到数据
+3. block为null，或者server.aof_stop_sending_diff没有数据，那么删除事件，跳出循环
+4. if (block->used > 0)  说明有需要写入到aof的文件的数据
+5. write(server.aof_pipe_write_data_to_child,block->buf,block->used); 用pipe写数据给到子进程
+6. if (nwritten <= 0) return; 没有数据了返回
+7. block->used == 0，说明当前block的数据已经发送完毕了，那么从aof_rewirte_buf_blocks上删除
+
+```c
+/* Event handler used to send data to the child process doing the AOF
+ * rewrite. We send pieces of our AOF differences buffer so that the final
+ * write when the child finishes the rewrite will be small. */
+ // 写入AOF文件数据得事件函数
+void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
+    listNode *ln;
+    aofrwblock *block;
+    ssize_t nwritten;
+    UNUSED(el);
+    UNUSED(fd);
+    UNUSED(privdata);
+    UNUSED(mask);
+
+    while(1) {
+        ln = listFirst(server.aof_rewrite_buf_blocks); // 从这个重写得块中，获取到第一个值
+        block = ln ? ln->value : NULL;
+        if (server.aof_stop_sending_diff || !block) {	// aof停止发送状态，或者block不存在，那么就返回
+            aeDeleteFileEvent(server.el,server.aof_pipe_write_data_to_child,
+                              AE_WRITABLE);
+            return;
+        }
+        if (block->used > 0) {	// 说明有需要写入到AOF文件得数据
+            nwritten = write(server.aof_pipe_write_data_to_child,	// 向child子进程写buf
+                             block->buf,block->used);	// C write函数
+            if (nwritten <= 0) return;
+            memmove(block->buf,block->buf+nwritten,block->used-nwritten);	// 改变下文件已经写入得指针位置
+			// 重置一下block中得used和free得值
+            block->used -= nwritten;
+            block->free += nwritten;
+        }
+        if (block->used == 0) listDelNode(server.aof_rewrite_buf_blocks,ln);	// block中used数据写完，那么删除节点ln
+    }
+}
+```
+
+
+
+### 9.4、bgsave/bgrewriteaof
+
+#### 9.4.1、bgrewriteaofCommand方法，
+
+bgrewriteaofCommand方法，最终也是调用rewriteAppendOnlyFileBackground方法。
+
+```c
+void bgrewriteaofCommand(client *c) {
+    if (server.child_type == CHILD_TYPE_AOF) {
+        addReplyError(c,"Background append only file rewriting already in progress");
+    } else if (hasActiveChildProcess()) {  // 是否存在子进程
+        server.aof_rewrite_scheduled = 1;
+        addReplyStatus(c,"Background append only file rewriting scheduled");
+    } else if (rewriteAppendOnlyFileBackground() == C_OK) {
+        addReplyStatus(c,"Background append only file rewriting started");
+    } else {
+        addReplyError(c,"Can't execute an AOF background rewriting. "
+                        "Please check the server logs for more information.");
+    }
+}
+```
+
+
+
+## 10、RDB
+
+
+
+## 11、主从复制
+
+redis主从复制需要注意的几个点：
+
+1. 弱一致性，是异步同步到slave的
+
+2. 主从同步
+
+3. 全量同步
+
+   > 同步流程：
+   >
+   > 1、rdb-》file-》socket
+   >
+   > 2、"rdb"-》socket    父进程：子进程
+   >
+   > master：全量同步：使用的是父子进程
+
+   全量同步原理：
+
+   ![](.\images\全量同步原理.jpg)
+
+4. 增量同步
+
+   > 全量之后的同步，buf空间积累
+   >
+   > 断开之后重连：享受了buf
+   >
+   > slaves 与 master 进度是不同的
+   >
+   > buf *1 有一个，大小1MB，使用【环形】结构
+
+主从复制原理图：
+
+![](./images/主从复制原理图.jpg)
+
+
+
+思考：1MB是不是有点小？
+
+> 开启主从同步，此时异步 * 写频繁 =》 容易造成主节点挂了，那么从数据会不一致
+
+max_memory 内存尽量小于 10G
+
+
+
+
+
+redis write写过程：
+
+1. 写数据给到对应的buf
+2. 注册写事件
+3. 等待eventLoop
+
+### repl_state
+
+server全局的状态位
+
+```c
+/* Slave replication state. Used in server.repl_state for slaves to remember
+ * what to do next. */
+typedef enum {
+    REPL_STATE_NONE = 0,            /* No active replication */
+    REPL_STATE_CONNECT,             /* Must connect to master */
+    REPL_STATE_CONNECTING,          /* Connecting to master */
+    /* --- Handshake states, must be ordered --- */
+    REPL_STATE_RECEIVE_PING_REPLY,  /* Wait for PING reply */
+    REPL_STATE_SEND_HANDSHAKE,      /* Send handshake sequance to master */
+    REPL_STATE_RECEIVE_AUTH_REPLY,  /* Wait for AUTH reply */
+    REPL_STATE_RECEIVE_PORT_REPLY,  /* Wait for REPLCONF reply */
+    REPL_STATE_RECEIVE_IP_REPLY,    /* Wait for REPLCONF reply */
+    REPL_STATE_RECEIVE_CAPA_REPLY,  /* Wait for REPLCONF reply */
+    REPL_STATE_SEND_PSYNC,          /* Send PSYNC */
+    REPL_STATE_RECEIVE_PSYNC_REPLY, /* Wait for PSYNC reply */
+    /* --- End of handshake states --- */
+    REPL_STATE_TRANSFER,        /* Receiving .rdb from master */
+    REPL_STATE_CONNECTED,       /* Connected to master */
+} repl_state;
+```
+
+
+
+### replicaofCommand
+
+
+
+
+
+### slaveTryPartialResynchronization
+
+sendCommand
+
+### syncCommand
+
+psync和sync命令最终调用得就是该方法
+
+### masterTryPartialResynchronization
+
+
+
+reply = sendCommand(conn,"PSYNC",psync_replid,psync_offset,NULL);
+
+
+
+### replicationResurrectCachedMaster
+
+1. 状态切换为
+2. 设置
+
+核心方法之：
+
+### rdbSaveToSlavesSockets
+
+执行流程：
+
+1. 创建pipe管道
+2. fork出子进程
+3. 子进程，推送数据到pipe
+4. 父进程-master，通过EventLoop 读取子进程的数据，发送给slave
+
+### rdbSaveBackground
+
+updateSlavesWaitingBgsave
+
+sendBulkToSlave
+
+rdb的发送用的 在 eventLoop中执行
+
+结束rdb发送后
+
+重置IO write的写函数为-> sendReplyToClient
+
+为什么每次执行完一个过程，都会将handler为什么要切换？
+
+## 12、redis集群
+
+## 13、哨兵
+
+## 14、内存分配
+
+### 14.1、什么是内存？
+
+内存就是一段空间，该空间就是一段组数。
+
+### 14.2、什么是指针？
+
+指针：就是你拿到的这个空间数组的某个位置的地址。
+
+### 14.3、redis使用的内存分配算法
+
+1. tcmalloc	-》 google
+2. jemalloc
+3. malloc -》 apple
+
+### 14.4、redis内存分配原理：
+
+![](.\images\redis_mallloc.jpg)
+
+### 14.5、redis内存分配函数：
+
+#### 14.5.1、zmalloc
+
+分配非零的内存数据，最小为一个long类型4字节数据
+
+```c
+/* Allocate memory or panic */
+void *zmalloc(size_t size) {
+    void *ptr = ztrymalloc_usable(size, NULL);
+    if (!ptr) zmalloc_oom_handler(size);
+    return ptr;
+}
+```
+
+#### 14.5.2、ztrymalloc_usable
+
+```c
+/* Try allocating memory, and return NULL if failed.
+ * '*usable' is set to the usable size if non NULL. */
+void *ztrymalloc_usable(size_t size, size_t *usable) {
+    ASSERT_NO_SIZE_OVERFLOW(size);
+    void *ptr = malloc(MALLOC_MIN_SIZE(size)+PREFIX_SIZE);
+	// PREFIX_SIZE 用来保存，当前分配的ptr的大小
+	// size不代办实际使用了多少个字节，只代表当前分配的大小
+    if (!ptr) return NULL;
+#ifdef HAVE_MALLOC_SIZE
+    size = zmalloc_size(ptr);
+    update_zmalloc_stat_alloc(size);
+    if (usable) *usable = size;
+    return ptr;
+#else
+    *((size_t*)ptr) = size;	// size_t位置存放size大小
+    update_zmalloc_stat_alloc(size+PREFIX_SIZE);
+    if (usable) *usable = size;
+    return (char*)ptr+PREFIX_SIZE;	// 这就是真正的对象指针
+#endif
+}
+
+```
+
+#### 14.5.3、zcalloc
+
+```c
+/* Allocate memory and zero it or panic */
+void *zcalloc(size_t size) {
+    void *ptr = ztrycalloc_usable(size, NULL);
+    if (!ptr) zmalloc_oom_handler(size);
+    return ptr;
+}
+
+/* Try allocating memory, and return NULL if failed. */
+void *ztrycalloc(size_t size) {
+    void *ptr = ztrycalloc_usable(size, NULL);
+    return ptr;
+}
+
+/* Allocate memory or panic.
+ * '*usable' is set to the usable size if non NULL. */
+void *zcalloc_usable(size_t size, size_t *usable) {
+    void *ptr = ztrycalloc_usable(size, usable);
+    if (!ptr) zmalloc_oom_handler(size);
+    return ptr;
+}
+
+/* Try reallocating memory, and return NULL if failed.
+ * '*usable' is set to the usable size if non NULL. */
+void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable) {
+    ASSERT_NO_SIZE_OVERFLOW(size);
+#ifndef HAVE_MALLOC_SIZE
+    void *realptr;
+#endif
+    size_t oldsize;
+    void *newptr;
+
+    /* not allocating anything, just redirect to free. */
+    if (size == 0 && ptr != NULL) {
+        zfree(ptr);
+        if (usable) *usable = 0;
+        return NULL;
+    }
+    /* Not freeing anything, just redirect to malloc. */
+    if (ptr == NULL)
+        return ztrymalloc_usable(size, usable);
+
+#ifdef HAVE_MALLOC_SIZE
+    oldsize = zmalloc_size(ptr);
+    newptr = realloc(ptr,size);
+    if (newptr == NULL) {
+        if (usable) *usable = 0;
+        return NULL;
+    }
+
+    update_zmalloc_stat_free(oldsize);
+    size = zmalloc_size(newptr);
+    update_zmalloc_stat_alloc(size);
+    if (usable) *usable = size;
+    return newptr;
+#else
+    realptr = (char*)ptr-PREFIX_SIZE;	// 拿到真是ptr指针
+    oldsize = *((size_t*)realptr);		// 转成size_t,代表了旧的空间size
+    newptr = realloc(realptr,size+PREFIX_SIZE);	// 新的size + PREFIX_SIZE
+    if (newptr == NULL) {
+        if (usable) *usable = 0;
+        return NULL;
+    }
+
+    *((size_t*)newptr) = size;
+    update_zmalloc_stat_free(oldsize);	// 更新释放旧的
+    update_zmalloc_stat_alloc(size);	// 更新incr
+    if (usable) *usable = size;
+    return (char*)newptr+PREFIX_SIZE;	// 新的newptr + 偏移size，就是分配的真实指针
+#endif
+}
+```
+
+#### 14.5.4、zrealloc-重新分配
+
+这里是已经分配的内存不够用了，那么尝试重新申请内存：
+
+尝试重新分配内存：
+
+```c
+/* Reallocate memory and zero it or panic */
+void *zrealloc(void *ptr, size_t size) {
+    ptr = ztryrealloc_usable(ptr, size, NULL);			// 分配内存
+    if (!ptr && size != 0) zmalloc_oom_handler(size);	// 分配内存失败，打印异常
+    return ptr;
+}
+
+/* Try Reallocating memory, and return NULL if failed. */
+void *ztryrealloc(void *ptr, size_t size) {
+    ptr = ztryrealloc_usable(ptr, size, NULL);
+    return ptr;
+}
+/* Try reallocating memory, and return NULL if failed.
+ * '*usable' is set to the usable size if non NULL. */
+void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable) {
+    ASSERT_NO_SIZE_OVERFLOW(size);
+#ifndef HAVE_MALLOC_SIZE
+    void *realptr;
+#endif
+    size_t oldsize;
+    void *newptr;
+
+    /* not allocating anything, just redirect to free. */
+    if (size == 0 && ptr != NULL) {
+        zfree(ptr);
+        if (usable) *usable = 0;
+        return NULL;
+    }
+    /* Not freeing anything, just redirect to malloc. */
+    if (ptr == NULL)
+        return ztrymalloc_usable(size, usable);
+
+#ifdef HAVE_MALLOC_SIZE
+    oldsize = zmalloc_size(ptr);
+    newptr = realloc(ptr,size);
+    if (newptr == NULL) {
+        if (usable) *usable = 0;
+        return NULL;
+    }
+
+    update_zmalloc_stat_free(oldsize);
+    size = zmalloc_size(newptr);
+    update_zmalloc_stat_alloc(size);
+    if (usable) *usable = size;
+    return newptr;
+#else
+    realptr = (char*)ptr-PREFIX_SIZE;	// 拿到真是ptr指针
+    oldsize = *((size_t*)realptr);		// 转成size_t,代表了旧的空间size
+    newptr = realloc(realptr,size+PREFIX_SIZE);	// 新的size + PREFIX_SIZE
+    if (newptr == NULL) {
+        if (usable) *usable = 0;
+        return NULL;
+    }
+
+    *((size_t*)newptr) = size;
+    update_zmalloc_stat_free(oldsize);	// 更新释放旧的
+    update_zmalloc_stat_alloc(size);	// 更新incr
+    if (usable) *usable = size;
+    return (char*)newptr+PREFIX_SIZE;	// 新的newptr + 偏移size，就是分配的真实指针
+#endif
+}
+
+```
+
+
+
+
+
+
+
+## 15、阻塞：blocking
+
+block 阻塞是根据如下redisDb结构体中所定义得：
+
+1.  dict *blocking_keys;
+2. dict *ready_keys;
+3. dict *watched_keys; 
+
+```c
+typedef struct redisDb {
+	// redis 正真的key-value存储
+    dict *dict;                 /* The keyspace for this DB */
+	// 存储已经超时过期的(k-v)
+	dict *expires;              /* Timeout of keys with a timeout set */
+    dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
+	dict *ready_keys;           /* Blocked keys that received a PUSH */
+    dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
+    int id;                     /* Database ID */
+	// 平均ttl时间
+    long long avg_ttl;          /* Average TTL, just for stats */
+	// 用来拿到过期的k-v
+    unsigned long expires_cursor; /* Cursor of the active expire cycle. */
+    list *defrag_later;         /* List of key names to attempt to defrag one by one, gradually. */
+} redisDb;
+```
+
+
+
+blocking状态
+
+```c
+/* Client block type (btype field in client structure)
+ * if CLIENT_BLOCKED flag is set. */
+#define BLOCKED_NONE 0    /* Not blocked, no CLIENT_BLOCKED flag set. */
+#define BLOCKED_LIST 1    /* BLPOP & co. */
+#define BLOCKED_WAIT 2    /* WAIT for synchronous replication. */
+#define BLOCKED_MODULE 3  /* Blocked by a loadable module. */
+#define BLOCKED_STREAM 4  /* XREAD. */
+#define BLOCKED_ZSET 5    /* BZPOP et al. */
+#define BLOCKED_PAUSE 6   /* Blocked by CLIENT PAUSE */		//阻塞释放
+#define BLOCKED_NUM 7     /* Number of blocked states. */
+```
+
+
+
+
+
+### 15.1、blpopCommand
+
+```c
+/* BLPOP <key> [<key> ...] <timeout> */
+void blpopCommand(client *c) {
+    blockingPopGenericCommand(c,LIST_HEAD);
+}
+```
+
+### 15.2、blockingPopGenericCommand
+
+```c
+void blockingPopGenericCommand(client *c, int where) {
+    robj *o;
+    mstime_t timeout;
+    int j;
+
+    if (getTimeoutFromObjectOrReply(c,c->argv[c->argc-1],&timeout,UNIT_SECONDS)
+        != C_OK) return;
+
+    for (j = 1; j < c->argc-1; j++) {
+        o = lookupKeyWrite(c->db,c->argv[j]);
+        if (o != NULL) {
+            if (checkType(c,o,OBJ_LIST)) {
+                return;
+            } else {
+                if (listTypeLength(o) != 0) {
+                    /* Non empty list, this is like a normal [LR]POP. */
+                    robj *value = listTypePop(o,where);
+                    serverAssert(value != NULL);
+
+                    addReplyArrayLen(c,2);
+                    addReplyBulk(c,c->argv[j]);
+                    addReplyBulk(c,value);
+                    decrRefCount(value);
+                    listElementsRemoved(c,c->argv[j],where,o,1);
+
+                    /* Replicate it as an [LR]POP instead of B[LR]POP. */
+                    rewriteClientCommandVector(c,2,
+                        (where == LIST_HEAD) ? shared.lpop : shared.rpop,
+                        c->argv[j]);
+                    return;
+                }
+            }
+        }
+    }
+
+    /* If we are not allowed to block the client, the only thing
+     * we can do is treating it as a timeout (even with timeout 0). */
+    if (c->flags & CLIENT_DENY_BLOCKING) {
+        addReplyNullArray(c);
+        return;
+    }
+
+    /* If the keys do not exist we must block */
+    struct listPos pos = {where};
+    blockForKeys(c,BLOCKED_LIST,c->argv + 1,c->argc - 2,timeout,NULL,&pos,NULL);
+}
+```
+
+
+
+### 15.3、blockForKeys
+
+作用：
+
+> 为指定的key (list, zset或stream)设置客户端为阻塞模式，并指定超时时间。
+>
+> 参数'type'是BLOCKED_LIST, BLOCKED_ZSET或BLOCKED_STREAM，这取决于我们等待空键来唤醒客户端的操作类型。
+>
+>  客户端被阻塞为所有的'numkeys'键，如'keys'参数。 当我们阻塞流键时，我们还提供了一个stream结构数组:只有当ID大于或等于指定ID的条目被附加到流中时，客户端才会被解除阻塞。
+
+
+
+```c
+/* This is how the current blocking lists/sorted sets/streams work, we use
+ * BLPOP as example, but the concept is the same for other list ops, sorted
+ * sets and XREAD.
+ * - If the user calls BLPOP and the key exists and contains a non empty list
+ *   then LPOP is called instead. So BLPOP is semantically the same as LPOP
+ *   if blocking is not required.
+ * - If instead BLPOP is called and the key does not exists or the list is
+ *   empty we need to block. In order to do so we remove the notification for
+ *   new data to read in the client socket (so that we'll not serve new
+ *   requests if the blocking request is not served). Also we put the client
+ *   in a dictionary (db->blocking_keys) mapping keys to a list of clients
+ *   blocking for this keys.
+ * - If a PUSH operation against a key with blocked clients waiting is
+ *   performed, we mark this key as "ready", and after the current command,
+ *   MULTI/EXEC block, or script, is executed, we serve all the clients waiting
+ *   for this list, from the one that blocked first, to the last, accordingly
+ *   to the number of elements we have in the ready list.
+ */
+
+/* Set a client in blocking mode for the specified key (list, zset or stream),
+ * with the specified timeout. The 'type' argument is BLOCKED_LIST,
+ * BLOCKED_ZSET or BLOCKED_STREAM depending on the kind of operation we are
+ * waiting for an empty key in order to awake the client. The client is blocked
+ * for all the 'numkeys' keys as in the 'keys' argument. When we block for
+ * stream keys, we also provide an array of streamID structures: clients will
+ * be unblocked only when items with an ID greater or equal to the specified
+ * one is appended to the stream. */
+void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeout, robj *target, struct listPos *listpos, streamID *ids) {
+    dictEntry *de;
+    list *l;
+    int j;
+
+    c->bpop.timeout = timeout;
+    c->bpop.target = target;
+
+    if (listpos != NULL) c->bpop.listpos = *listpos;
+
+    if (target != NULL) incrRefCount(target);
+
+    for (j = 0; j < numkeys; j++) {
+        /* Allocate our bkinfo structure, associated to each key the client
+         * is blocked for. */
+        bkinfo *bki = zmalloc(sizeof(*bki));
+        if (btype == BLOCKED_STREAM)
+            bki->stream_id = ids[j];
+
+        /* If the key already exists in the dictionary ignore it. */
+        if (dictAdd(c->bpop.keys,keys[j],bki) != DICT_OK) {
+            zfree(bki);
+            continue;
+        }
+        incrRefCount(keys[j]);
+
+        /* And in the other "side", to map keys -> clients */
+        de = dictFind(c->db->blocking_keys,keys[j]);
+        if (de == NULL) {
+            int retval;
+
+            /* For every key we take a list of clients blocked for it */
+            l = listCreate();
+            retval = dictAdd(c->db->blocking_keys,keys[j],l);	// 添加到阻塞使用的dict上
+            incrRefCount(keys[j]);
+            serverAssertWithInfo(c,keys[j],retval == DICT_OK);
+        } else {
+            l = dictGetVal(de);
+        }
+        listAddNodeTail(l,c);
+        bki->listnode = listLast(l);
+    }
+    blockClient(c,btype);
+}
+```
+
+### 15.4、blockClient
+
+作用：阻塞特定操作类型的客户端。 一旦设置了CLIENT_BLOCKED标志，客户端查询缓冲区将不再被处理，而是累积起来，并且当客户端被解除阻塞时将被处理  
+
+```c
+/* Block a client for the specific operation type. Once the CLIENT_BLOCKED
+ * flag is set client query buffer is not longer processed, but accumulated,
+ * and will be processed when the client is unblocked. */
+void blockClient(client *c, int btype) {
+    /* Master client should never be blocked unless pause or module */
+    serverAssert(!(c->flags & CLIENT_MASTER &&
+                   btype != BLOCKED_MODULE &&
+                   btype != BLOCKED_PAUSE));
+
+    c->flags |= CLIENT_BLOCKED;
+    c->btype = btype;
+    server.blocked_clients++;
+    server.blocked_clients_by_type[btype]++;
+    addClientToTimeoutTable(c);
+    if (btype == BLOCKED_PAUSE) {
+        listAddNodeTail(server.paused_clients, c);
+        c->paused_list_node = listLast(server.paused_clients);
+        /* Mark this client to execute its command */
+        c->flags |= CLIENT_PENDING_COMMAND;
+    }
+}
+```
+
+
+
+
+
+### 15.5、pushCommand
+
+```c
+/* LPUSH <key> <element> [<element> ...] */
+void lpushCommand(client *c) {
+    pushGenericCommand(c,LIST_HEAD,0);
+}
+
+/* RPUSH <key> <element> [<element> ...] */
+void rpushCommand(client *c) {
+    pushGenericCommand(c,LIST_TAIL,0);
+}
+
+/* LPUSHX <key> <element> [<element> ...] */
+void lpushxCommand(client *c) {
+    pushGenericCommand(c,LIST_HEAD,1);
+}
+
+/* RPUSH <key> <element> [<element> ...] */
+void rpushxCommand(client *c) {
+    pushGenericCommand(c,LIST_TAIL,1);
+}
+```
+
+### 15.6、pushGenericCommand
+
+```c
+/*-----------------------------------------------------------------------------
+ * List Commands
+ *----------------------------------------------------------------------------*/
+
+/* Implements LPUSH/RPUSH/LPUSHX/RPUSHX. 
+ * 'xx': push if key exists. */
+void pushGenericCommand(client *c, int where, int xx) {
+    int j;
+
+    for (j = 2; j < c->argc; j++) {
+        if (sdslen(c->argv[j]->ptr) > LIST_MAX_ITEM_SIZE) {
+            addReplyError(c, "Element too large");
+            return;
+        }
+    }
+
+    robj *lobj = lookupKeyWrite(c->db, c->argv[1]);	// lookup一下当前的key，用于内存淘汰策略
+    if (checkType(c,lobj,OBJ_LIST)) return;	// 检查类型
+    if (!lobj) {
+        if (xx) {
+            addReply(c, shared.czero);
+            return;
+        }
+
+        lobj = createQuicklistObject();		// 创建快表类型
+        quicklistSetOptions(lobj->ptr, server.list_max_ziplist_size,
+                            server.list_compress_depth);	// 设置快表得属性 fill = -2 默认
+        dbAdd(c->db,c->argv[1],lobj);	// 添加到dict
+    }
+
+    for (j = 2; j < c->argc; j++) {
+        listTypePush(lobj,c->argv[j],where);
+        server.dirty++;
+    }
+
+    addReplyLongLong(c, listTypeLength(lobj));
+
+    char *event = (where == LIST_HEAD) ? "lpush" : "rpush";
+    signalModifiedKey(c,c->db,c->argv[1]);
+    notifyKeyspaceEvent(NOTIFY_LIST,event,c->argv[1],c->db->id);
+}
+```
+
+
+
+### 15.7、addReply
+
+```c
+/* -----------------------------------------------------------------------------
+ * Higher level functions to queue data on the client output buffer.
+ * The following functions are the ones that commands implementations will call.
+ * -------------------------------------------------------------------------- */
+
+/* Add the object 'obj' string representation to the client output buffer. */
+// 添加 obj 到 client得output buffer中
+void addReply(client *c, robj *obj) {
+    if (prepareClientToWrite(c) != C_OK) return;
+
+    if (sdsEncodedObject(obj)) {
+        if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != C_OK)
+            _addReplyProtoToList(c,obj->ptr,sdslen(obj->ptr));
+    } else if (obj->encoding == OBJ_ENCODING_INT) {
+        /* For integer encoded strings we just convert it into a string
+         * using our optimized function, and attach the resulting string
+         * to the output buffer. */
+        char buf[32];
+        size_t len = ll2string(buf,sizeof(buf),(long)obj->ptr);
+        if (_addReplyToBuffer(c,buf,len) != C_OK)
+            _addReplyProtoToList(c,buf,len);
+    } else {
+        serverPanic("Wrong obj->encoding in addReply()");
+    }
+}
+```
+
+
+
+### 15.8、dbAdd
+
+```c
+/* Add the key to the DB. It's up to the caller to increment the reference
+ * counter of the value if needed.
+ *
+ * The program is aborted if the key already exists. */
+void dbAdd(redisDb *db, robj *key, robj *val) {
+    sds copy = sdsdup(key->ptr);					// 从key的ptr转成sds字符串
+    int retval = dictAdd(db->dict, copy, val);		// 添加
+
+    serverAssertWithInfo(NULL,key,retval == DICT_OK);
+    signalKeyAsReady(db, key, val->type);
+    if (server.cluster_enabled) slotToKeyAdd(key->ptr);
+}
+```
+
+### 15.9、signalKeyAsReady
+
+作用:
+
+> 如果指定的键有客户端阻塞等待列表推送，这个函数将把键引用放入服务器的 ready_keys列表。
+>
+> 注意，db->ready_keys是一个哈希表，它允许我们避免在脚本或MULTI/EXEC上下文中多次推送时，将相同的键一次又一次地放在列表中。  
+
+```c
+
+/* If the specified key has clients blocked waiting for list pushes, this
+ * function will put the key reference into the server.ready_keys list.
+ * Note that db->ready_keys is a hash table that allows us to avoid putting
+ * the same key again and again in the list in case of multiple pushes
+ * made by a script or in the context of MULTI/EXEC.
+ *
+ * The list will be finally processed by handleClientsBlockedOnKeys() */
+void signalKeyAsReady(redisDb *db, robj *key, int type) {
+    readyList *rl;
+
+    /* Quick returns. */
+    int btype = getBlockedTypeByType(type);
+    if (btype == BLOCKED_NONE) {
+        /* The type can never block. */
+        return;
+    }
+    if (!server.blocked_clients_by_type[btype] &&
+        !server.blocked_clients_by_type[BLOCKED_MODULE]) {
+        /* No clients block on this type. Note: Blocked modules are represented
+         * by BLOCKED_MODULE, even if the intention is to wake up by normal
+         * types (list, zset, stream), so we need to check that there are no
+         * blocked modules before we do a quick return here. */
+        return;
+    }
+
+    /* No clients blocking for this key? No need to queue it. */
+    if (dictFind(db->blocking_keys,key) == NULL) return;
+
+    /* Key was already signaled? No need to queue it again. */
+    if (dictFind(db->ready_keys,key) != NULL) return;
+
+    /* Ok, we need to queue this key into server.ready_keys. */
+    rl = zmalloc(sizeof(*rl));
+    rl->key = key;
+    rl->db = db;
+    incrRefCount(key);
+    listAddNodeTail(server.ready_keys,rl);
+
+    /* We also add the key in the db->ready_keys dictionary in order
+     * to avoid adding it multiple times into a list with a simple O(1)
+     * check. */
+    incrRefCount(key);
+    serverAssert(dictAdd(db->ready_keys,key,NULL) == DICT_OK);
+}
+
+```
+
+
+
+### 15.10、signalModifiedKey
+
+```c
+/*-----------------------------------------------------------------------------
+ * Hooks for key space changes.
+ *
+ * Every time a key in the database is modified the function
+ * signalModifiedKey() is called.
+ *
+ * Every time a DB is flushed the function signalFlushDb() is called.
+ *----------------------------------------------------------------------------*/
+
+/* Note that the 'c' argument may be NULL if the key was modified out of
+ * a context of a client. */
+void signalModifiedKey(client *c, redisDb *db, robj *key) {
+    touchWatchedKey(db,key);		// 检查key是否存在，存在标记为dirty
+    trackingInvalidateKey(c,key);	// 检查是否是无效的key
+}
+```
+
+### 15.11、touchWatchedKey
+
+作用：检查一下啊当前的key是否在数据库中已经存在，如果存在了那么就将其flags标记为dirty。
+
+```c
+/* "Touch" a key, so that if this key is being WATCHed by some client the
+ * next EXEC will fail. */
+void touchWatchedKey(redisDb *db, robj *key) {
+    list *clients;
+    listIter li;
+    listNode *ln;
+
+    if (dictSize(db->watched_keys) == 0) return;
+    clients = dictFetchValue(db->watched_keys, key);
+    if (!clients) return;
+
+    /* Mark all the clients watching this key as CLIENT_DIRTY_CAS */
+    /* Check if we are already watching for this key */
+    listRewind(clients,&li);
+    while((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+
+        c->flags |= CLIENT_DIRTY_CAS;	// 此时这个key被操作了，那么就将这个key设置为dirty
+    }
+}
+```
+
+
+
+### 15.12、notifyKeyspaceEvent
+
+该函数，会最终调用pubsubPublishMessage用来发送给到监听它的客户端发送数据
+
+```c
+/* The API provided to the rest of the Redis core is a simple function:
+ *
+ * notifyKeyspaceEvent(char *event, robj *key, int dbid);
+ *
+ * 'event' is a C string representing the event name.
+ * 'key' is a Redis object representing the key name.
+ * 'dbid' is the database ID where the key lives.  */
+void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
+    sds chan;
+    robj *chanobj, *eventobj;
+    int len = -1;
+    char buf[24];
+
+    /* If any modules are interested in events, notify the module system now.
+     * This bypasses the notifications configuration, but the module engine
+     * will only call event subscribers if the event type matches the types
+     * they are interested in. */
+     moduleNotifyKeyspaceEvent(type, event, key, dbid);
+
+    /* If notifications for this class of events are off, return ASAP. */
+    if (!(server.notify_keyspace_events & type)) return;
+
+    eventobj = createStringObject(event,strlen(event));
+
+    /* __keyspace@<db>__:<key> <event> notifications. */
+    if (server.notify_keyspace_events & NOTIFY_KEYSPACE) {
+        chan = sdsnewlen("__keyspace@",11);
+        len = ll2string(buf,sizeof(buf),dbid);
+        chan = sdscatlen(chan, buf, len);
+        chan = sdscatlen(chan, "__:", 3);
+        chan = sdscatsds(chan, key->ptr);
+        chanobj = createObject(OBJ_STRING, chan);
+        pubsubPublishMessage(chanobj, eventobj);	// 发送通知消息给被监听的key
+        decrRefCount(chanobj);
+    }
+
+    /* __keyevent@<db>__:<event> <key> notifications. */
+    if (server.notify_keyspace_events & NOTIFY_KEYEVENT) {
+        chan = sdsnewlen("__keyevent@",11);
+        if (len == -1) len = ll2string(buf,sizeof(buf),dbid);
+        chan = sdscatlen(chan, buf, len);
+        chan = sdscatlen(chan, "__:", 3);
+        chan = sdscatsds(chan, eventobj->ptr);
+        chanobj = createObject(OBJ_STRING, chan);
+        pubsubPublishMessage(chanobj, key);	// 发送通知消息给被监听的event
+        decrRefCount(chanobj);
+    }
+    decrRefCount(eventobj);
+}
+
+```
+
+
+
+以上是添加dict并设置block的状态,等待下次执行过来的时候调用
+
+processCommand
+
+call(c,CMD_CALL_FULL);
+
+### 15.13、handleClientsBlockedOnKeys
+
+作用:
+
+> 该函数执行MULTI/EXEC、Lua脚本、或者在客户端执行终命令之后,它的每一个命令都会被Redis调用. 通过一个阻塞命令来处理在阻塞列表、stream流和排序集合的客户端 
+>
+> 通过某些写操作 接收到至少一个新元素的至少有一个客户端将会把所有键都累积到服务器ready_keys列表。这个函数将运行这个列表,并相应的为客户端提供服务. 需要注意的是,这个函数会被返回迭代,作为服务BLMOVE的结果,我们可以有新的阻塞客户端来服务,因为BLMOVE的PUSH端
+>
+> 这个函数通常是公平的,也就是说,它将使用FIFO行为来为客户端提供服务. 然后这种公平在某些边缘情况下是违反, 也就是说 当我们有 客户端阻塞时, 在一个已排序的集合和一个列表中,对于相同的键(在客户端做这是确实是一件非常奇怪的事情), 因为不匹配的客户端(阻塞的类型与当前键类型不同)被移动到链表的另一边. 然后只要键开始只用于单一类型, 就像几乎任何redis程序做的, 这是这个函数具有公平性.
+
+```c
+/* This function should be called by Redis every time a single command,
+ * a MULTI/EXEC block, or a Lua script, terminated its execution after
+ * being called by a client. It handles serving clients blocked in
+ * lists, streams, and sorted sets, via a blocking commands.
+ *
+ * All the keys with at least one client blocked that received at least
+ * one new element via some write operation are accumulated into
+ * the server.ready_keys list. This function will run the list and will
+ * serve clients accordingly. Note that the function will iterate again and
+ * again as a result of serving BLMOVE we can have new blocking clients
+ * to serve because of the PUSH side of BLMOVE.
+ *
+ * This function is normally "fair", that is, it will server clients
+ * using a FIFO behavior. However this fairness is violated in certain
+ * edge cases, that is, when we have clients blocked at the same time
+ * in a sorted set and in a list, for the same key (a very odd thing to
+ * do client side, indeed!). Because mismatching clients (blocking for
+ * a different type compared to the current key type) are moved in the
+ * other side of the linked list. However as long as the key starts to
+ * be used only for a single type, like virtually any Redis application will
+ * do, the function is already fair. */
+void handleClientsBlockedOnKeys(void) {
+    while(listLength(server.ready_keys) != 0) {
+        list *l;
+
+        /* Point server.ready_keys to a fresh list and save the current one
+         * locally. This way as we run the old list we are free to call
+         * signalKeyAsReady() that may push new elements in server.ready_keys
+         * when handling clients blocked into BLMOVE. */
+        l = server.ready_keys;
+        server.ready_keys = listCreate();
+
+        while(listLength(l) != 0) {
+            listNode *ln = listFirst(l);
+            readyList *rl = ln->value;
+
+            /* First of all remove this key from db->ready_keys so that
+             * we can safely call signalKeyAsReady() against this key. */
+            dictDelete(rl->db->ready_keys,rl->key);
+
+            /* Even if we are not inside call(), increment the call depth
+             * in order to make sure that keys are expired against a fixed
+             * reference time, and not against the wallclock time. This
+             * way we can lookup an object multiple times (BLMOVE does
+             * that) without the risk of it being freed in the second
+             * lookup, invalidating the first one.
+             * See https://github.com/redis/redis/pull/6554. */
+            server.fixed_time_expire++;
+            updateCachedTime(0);
+
+            /* Serve clients blocked on the key. */
+            robj *o = lookupKeyWrite(rl->db,rl->key);
+
+            if (o != NULL) {
+                if (o->type == OBJ_LIST)
+                    serveClientsBlockedOnListKey(o,rl);
+                else if (o->type == OBJ_ZSET)
+                    serveClientsBlockedOnSortedSetKey(o,rl);
+                else if (o->type == OBJ_STREAM)
+                    serveClientsBlockedOnStreamKey(o,rl);
+                /* We want to serve clients blocked on module keys
+                 * regardless of the object type: we don't know what the
+                 * module is trying to accomplish right now. */
+                serveClientsBlockedOnKeyByModule(rl);
+            }
+            server.fixed_time_expire--;
+
+            /* Free this item. */
+            decrRefCount(rl->key);
+            zfree(rl);
+            listDelNode(l,ln);
+        }
+        listRelease(l); /* We have the new list on place at this point. */
+    }
+}
+```
+
+
+
+### 15.14、serveClientsBlockedOnListKey
+
+```c
+/* Helper function for handleClientsBlockedOnKeys(). This function is called
+ * when there may be clients blocked on a sorted set key, and there may be new
+ * data to fetch (the key is ready). */
+void serveClientsBlockedOnSortedSetKey(robj *o, readyList *rl) {
+    /* We serve clients in the same order they blocked for
+     * this key, from the first blocked to the last. */
+    dictEntry *de = dictFind(rl->db->blocking_keys,rl->key);
+    if (de) {
+        list *clients = dictGetVal(de);
+        int numclients = listLength(clients);
+        unsigned long zcard = zsetLength(o);
+
+        while(numclients-- && zcard) {
+            listNode *clientnode = listFirst(clients);
+            client *receiver = clientnode->value;
+
+            if (receiver->btype != BLOCKED_ZSET) {
+                /* Put at the tail, so that at the next call
+                 * we'll not run into it again. */
+                listRotateHeadToTail(clients);
+                continue;
+            }
+
+            int where = (receiver->lastcmd &&
+                         receiver->lastcmd->proc == bzpopminCommand)
+                         ? ZSET_MIN : ZSET_MAX;
+            monotime replyTimer;
+            elapsedStart(&replyTimer);
+            genericZpopCommand(receiver,&rl->key,1,where,1,NULL);
+            updateStatsOnUnblock(receiver, 0, elapsedUs(replyTimer));
+            unblockClient(receiver);
+            zcard--;
+
+            /* Replicate the command. */
+            robj *argv[2];
+            struct redisCommand *cmd = where == ZSET_MIN ?
+                                       server.zpopminCommand :
+                                       server.zpopmaxCommand;
+            argv[0] = createStringObject(cmd->name,strlen(cmd->name));
+            argv[1] = rl->key;
+            incrRefCount(rl->key);
+            propagate(cmd,receiver->db->id,
+                      argv,2,PROPAGATE_AOF|PROPAGATE_REPL);
+            decrRefCount(argv[0]);
+            decrRefCount(argv[1]);
+        }
+    }
+}
+```
+
+
+
+### 15.15、unblockClient
+
+```c
+/* Unblock a client calling the right function depending on the kind
+ * of operation the client is blocking for. */
+void unblockClient(client *c) {
+    if (c->btype == BLOCKED_LIST ||
+        c->btype == BLOCKED_ZSET ||
+        c->btype == BLOCKED_STREAM) {
+        unblockClientWaitingData(c);
+    } else if (c->btype == BLOCKED_WAIT) {
+        unblockClientWaitingReplicas(c);
+    } else if (c->btype == BLOCKED_MODULE) {
+        if (moduleClientIsBlockedOnKeys(c)) unblockClientWaitingData(c);
+        unblockClientFromModule(c);
+    } else if (c->btype == BLOCKED_PAUSE) {
+        listDelNode(server.paused_clients,c->paused_list_node);
+        c->paused_list_node = NULL;
+    } else {
+        serverPanic("Unknown btype in unblockClient().");
+    }
+
+    /* Reset the client for a new query since, for blocking commands
+     * we do not do it immediately after the command returns (when the
+     * client got blocked) in order to be still able to access the argument
+     * vector from module callbacks and updateStatsOnUnblock. */
+    if (c->btype != BLOCKED_PAUSE) {
+        freeClientOriginalArgv(c);
+        resetClient(c);
+    }
+
+    /* Clear the flags, and put the client in the unblocked list so that
+     * we'll process new commands in its query buffer ASAP. */
+    server.blocked_clients--;
+    server.blocked_clients_by_type[c->btype]--;
+    c->flags &= ~CLIENT_BLOCKED;
+    c->btype = BLOCKED_NONE;
+    removeClientFromTimeoutTable(c);
+    queueClientForReprocessing(c);
+}
+```
+
+### 15.16、总结:
+
+客户端发送阻塞任务，redis后台是运行得，不会被阻塞住
+
+## 16、publish-subscribe
+
+
+
+```c
+ 
+struct redisServer {
+	/* Pubsub */
+    dict *pubsub_channels;  /* Map channels to list of subscribed clients */
+    dict *pubsub_patterns;  /* A dict of pubsub_patterns */
+    int notify_keyspace_events; /* Events to propagate via Pub/Sub. This is an
+    
+   }
+```
+
+### 16.1、publish
+
+#### 16.1.1、publishCommand
+
+```c
+/* PUBLISH <channel> <message> */
+void publishCommand(client *c) {
+    int receivers = pubsubPublishMessage(c->argv[1],c->argv[2]);
+    if (server.cluster_enabled)
+        clusterPropagatePublish(c->argv[1],c->argv[2]);
+    else
+        forceCommandPropagation(c,PROPAGATE_REPL);
+    addReplyLongLong(c,receivers);
+}
+```
+
+##### 16.1.2、pubsubPublishMessage
+
+发布事件函数
+
+```c
+/* Publish a message */
+int pubsubPublishMessage(robj *channel, robj *message) {
+    int receivers = 0;
+    dictEntry *de;
+    dictIterator *di;
+    listNode *ln;
+    listIter li;
+
+    /* Send to clients listening for that channel */
+    de = dictFind(server.pubsub_channels,channel);	// 从channel找到key
+    if (de) {					 // de存在
+        list *list = dictGetVal(de);	// 找到list
+        listNode *ln;
+        listIter li;
+
+        listRewind(list,&li);		// 反转，用于遍历
+        while ((ln = listNext(&li)) != NULL) {
+            client *c = ln->value;
+            addReplyPubsubMessage(c,channel,message);	// 添加message给channel
+            receivers++;
+        }
+    }
+    /* Send to clients listening to matching channels */
+	//  发送匹配订阅的数据到对应client
+    di = dictGetIterator(server.pubsub_patterns);
+    if (di) {
+        channel = getDecodedObject(channel);
+        while((de = dictNext(di)) != NULL) {
+            robj *pattern = dictGetKey(de);
+            list *clients = dictGetVal(de);
+			// 匹配不到，跳过
+            if (!stringmatchlen((char*)pattern->ptr,	
+                                sdslen(pattern->ptr),
+                                (char*)channel->ptr,
+                                sdslen(channel->ptr),0)) continue;
+
+            listRewind(clients,&li);
+            while ((ln = listNext(&li)) != NULL) {
+                client *c = listNodeValue(ln);
+				// 匹配成功发送
+                addReplyPubsubPatMessage(c,pattern,channel,message);
+                receivers++;
+            }
+        }
+        decrRefCount(channel);
+        dictReleaseIterator(di);
+    }
+    return receivers;
+}
+
+```
+
+
+
+##### 16.1.3、addReplyPubsubMessage
+
+作用:
+
+> 向客户端发送一个类型为“message”的pubsub消息。 通常'msg'是一个包含要作为消息发送的字符串的Redis对象。
+>
+> 然而，如果调用者将'msg'设置为NULL，它将能够通过使用addReply*() API家族发送一个特殊的消息(例如数组类型)  
+
+```c
+/*-----------------------------------------------------------------------------
+ * Pubsub client replies API
+ *----------------------------------------------------------------------------*/
+
+/* Send a pubsub message of type "message" to the client.
+ * Normally 'msg' is a Redis object containing the string to send as
+ * message. However if the caller sets 'msg' as NULL, it will be able
+ * to send a special message (for instance an Array type) by using the
+ * addReply*() API family. */
+void addReplyPubsubMessage(client *c, robj *channel, robj *msg) {
+    if (c->resp == 2)
+        addReply(c,shared.mbulkhdr[3]);
+    else
+        addReplyPushLen(c,3);
+    addReply(c,shared.messagebulk);
+    addReplyBulk(c,channel);
+    if (msg) addReplyBulk(c,msg);
+}
+/* Add a Redis Object as a bulk reply */
+void addReplyBulk(client *c, robj *obj) {
+    addReplyBulkLen(c,obj);
+    addReply(c,obj);
+    addReply(c,shared.crlf);
+}
+
+/* -----------------------------------------------------------------------------
+ * Higher level functions to queue data on the client output buffer.
+ * The following functions are the ones that commands implementations will call.
+ * -------------------------------------------------------------------------- */
+
+/* Add the object 'obj' string representation to the client output buffer. */
+// 添加 obj 到 client得output buffer中
+// 在客户端输出缓冲区上对数据进行队列的高级函数。  
+void addReply(client *c, robj *obj) {
+    if (prepareClientToWrite(c) != C_OK) return;
+
+    if (sdsEncodedObject(obj)) {
+        if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != C_OK)
+            _addReplyProtoToList(c,obj->ptr,sdslen(obj->ptr));
+    } else if (obj->encoding == OBJ_ENCODING_INT) {
+        /* For integer encoded strings we just convert it into a string
+         * using our optimized function, and attach the resulting string
+         * to the output buffer. */
+        char buf[32];
+        size_t len = ll2string(buf,sizeof(buf),(long)obj->ptr);
+        if (_addReplyToBuffer(c,buf,len) != C_OK)
+            _addReplyProtoToList(c,buf,len);
+    } else {
+        serverPanic("Wrong obj->encoding in addReply()");
+    }
+}
+```
+
+
+
+### 16.2、subscribe-订阅
+
+总结:
+
+发布订阅中：使用命令 ，可以订阅某一个key，如果这个key有任何操作，都能立刻感知到这个事件。
+
+如果是set key1 uuid ex 10 nx，如果这个key1过期，会使用回调通知的情况，让订阅了这个key的客户端立刻感知到。使用回调通知，要比循环调用检查这个key的性能会更好
+
+#### 16.2.1、subscribeCommand
+
+```c
+/* SUBSCRIBE channel [channel ...] */
+void subscribeCommand(client *c) {
+    int j;
+    if ((c->flags & CLIENT_DENY_BLOCKING) && !(c->flags & CLIENT_MULTI)) {
+        /**
+         * A client that has CLIENT_DENY_BLOCKING flag on
+         * expect a reply per command and so can not execute subscribe.
+         *
+         * Notice that we have a special treatment for multi because of
+         * backword compatibility
+         */
+        addReplyError(c, "SUBSCRIBE isn't allowed for a DENY BLOCKING client");
+        return;
+    }
+
+    for (j = 1; j < c->argc; j++)
+        pubsubSubscribeChannel(c,c->argv[j]);
+    c->flags |= CLIENT_PUBSUB;	 
+}
+```
+
+#### 16.2.2、pubsubSubscribeChannel
+
+订阅当前channel,将需要订阅的channel添加到客户端哈希表中..添加成功,即订阅成功.
+
+```c
+/* Subscribe a client to a channel. Returns 1 if the operation succeeded, or
+ * 0 if the client was already subscribed to that channel. */
+int pubsubSubscribeChannel(client *c, robj *channel) {
+    dictEntry *de;
+    list *clients = NULL;
+    int retval = 0;
+
+    /* Add the channel to the client -> channels hash table */
+    if (dictAdd(c->pubsub_channels,channel,NULL) == DICT_OK) {
+        retval = 1;
+        incrRefCount(channel);
+        /* Add the client to the channel -> list of clients hash table */
+        // 添加client到channel,对应客户端哈希表
+        de = dictFind(server.pubsub_channels,channel);
+        if (de == NULL) {
+            clients = listCreate();
+            dictAdd(server.pubsub_channels,channel,clients);
+            incrRefCount(channel);
+        } else {
+            clients = dictGetVal(de);
+        }
+        listAddNodeTail(clients,c);
+    }
+    /* Notify the client */
+    addReplyPubsubSubscribed(c,channel);
+    return retval;
+}
+```
+
+
+
+#### 16.2.3、addReplyPubsubSubscribed
+
+订阅成功,发送消息给客户端
+
+```c
+/* Send the pubsub subscription notification to the client. */
+void addReplyPubsubSubscribed(client *c, robj *channel) {
+    if (c->resp == 2)
+        addReply(c,shared.mbulkhdr[3]);
+    else
+        addReplyPushLen(c,3);
+    addReply(c,shared.subscribebulk);
+    addReplyBulk(c,channel);
+    addReplyLongLong(c,clientSubscriptionsCount(c));
+}
+```
+
+
+
+## 17、事务-transaction
+
+redis 使用的懒事务（
+
+原子（无回滚）
+
+exec执行完（有可能报错，）：不执行。
+
+本质，客户端要维护一个队列，
+
+因为，
+
+命令是排队执行的
+
+且，使用flags来标记是否是需要事务执行的 mutli  开头，再命令，
+
+通过*watch，来看下这个是否是被其他人修改过，如果修改了那么就比较为dirty，那么下次看到这个，exec就不执行
+
+### 17.1、watchCommand
+
+```c
+void watchCommand(client *c) {
+    int j;
+
+    if (c->flags & CLIENT_MULTI) {
+        addReplyError(c,"WATCH inside MULTI is not allowed");
+        return;
+    }
+    for (j = 1; j < c->argc; j++)
+        watchForKey(c,c->argv[j]);
+    addReply(c,shared.ok);
+}
+```
+
+### 17.2、watchForKey
+
+对传进来的key，直接watch
+
+```c
+/* Watch for the specified key */
+void watchForKey(client *c, robj *key) {
+    list *clients = NULL;
+    listIter li;
+    listNode *ln;
+    watchedKey *wk;
+
+    /* Check if we are already watching for this key */
+    listRewind(c->watched_keys,&li);
+    while((ln = listNext(&li))) {
+        wk = listNodeValue(ln);
+        if (wk->db == c->db && equalStringObjects(key,wk->key))
+            return; /* Key already watched */
+    }
+    /* This key is not already watched in this DB. Let's add it */
+    clients = dictFetchValue(c->db->watched_keys,key);
+    if (!clients) {
+        clients = listCreate();
+        dictAdd(c->db->watched_keys,key,clients);
+        incrRefCount(key);
+    }
+    listAddNodeTail(clients,c);
+    /* Add the new key to the list of keys watched by this client */
+    wk = zmalloc(sizeof(*wk));
+    wk->key = key;
+    wk->db = c->db;
+    incrRefCount(key);
+    listAddNodeTail(c->watched_keys,wk);
+}
+```
+
+### 17.3、multiCommand
+
+**注意：**在任何一个key被操作的时候，都会至少检查三个过程
+
+1. 发布订阅的key
+2. 阻塞查询操作
+3. touchWatchKey的操作
+
+作用：主要是给这个client设置一个标记位，等待下次执行调用processCommand的时候，来处理multi
+
+```c
+void multiCommand(client *c) {
+    if (c->flags & CLIENT_MULTI) {
+        addReplyError(c,"MULTI calls can not be nested");
+        return;
+    }
+    // 设置标记位
+    c->flags |= CLIENT_MULTI;
+
+    addReply(c,shared.ok);
+}
+```
+
+processCommand 函数中处理multi命令的时候，调用queueMultiCommand函数，将命令放入到c->mstate这个结构体对应的multiCmd队列中，等待调用exce命令，执行multi指令，调用execCommand函数
+
+### 17.4、execCommand
+
+```c
+void execCommand(client *c) {
+    int j;
+    robj **orig_argv;
+    int orig_argc;
+    struct redisCommand *orig_cmd;
+    int was_master = server.masterhost == NULL;
+
+    if (!(c->flags & CLIENT_MULTI)) {		// 不存咋 multi命令，回复客户端，并退出
+        addReplyError(c,"EXEC without MULTI");
+        return;
+    }
+
+    /* EXEC with expired watched key is disallowed*/
+    if (isWatchedKeyExpired(c)) {		// 检查key是不是已经过期了
+        c->flags |= (CLIENT_DIRTY_CAS);	// 如果过期，那么标记为dirty
+    }
+
+    /* Check if we need to abort the EXEC because:
+     * 1) Some WATCHed key was touched.
+     * 2) There was a previous error while queueing commands.
+     * A failed EXEC in the first case returns a multi bulk nil object
+     * (technically it is not an error but a special behavior), while
+     * in the second an EXECABORT error is returned. */
+    if (c->flags & (CLIENT_DIRTY_CAS | CLIENT_DIRTY_EXEC)) {	// 判断状态，
+        if (c->flags & CLIENT_DIRTY_EXEC) {
+            addReplyErrorObject(c, shared.execaborterr);
+        } else {
+            addReply(c, shared.nullarray[c->resp]);
+        }
+
+        discardTransaction(c);	// 状态异常，丢弃事务
+        return;
+    }
+
+    uint64_t old_flags = c->flags;
+
+    /* we do not want to allow blocking commands inside multi */
+    c->flags |= CLIENT_DENY_BLOCKING;
+
+    /* Exec all the queued commands */
+    unwatchAllKeys(c); /* Unwatch ASAP otherwise we'll waste CPU cycles */
+
+    server.in_exec = 1;
+
+    orig_argv = c->argv;
+    orig_argc = c->argc;
+    orig_cmd = c->cmd;
+    addReplyArrayLen(c,c->mstate.count);
+    for (j = 0; j < c->mstate.count; j++) {
+        c->argc = c->mstate.commands[j].argc;
+        c->argv = c->mstate.commands[j].argv;
+        c->cmd = c->mstate.commands[j].cmd;
+
+        /* ACL permissions are also checked at the time of execution in case
+         * they were changed after the commands were queued. */
+        int acl_errpos;
+        int acl_retval = ACLCheckAllPerm(c,&acl_errpos);
+        if (acl_retval != ACL_OK) {
+            char *reason;
+            switch (acl_retval) {
+            case ACL_DENIED_CMD:
+                reason = "no permission to execute the command or subcommand";
+                break;
+            case ACL_DENIED_KEY:
+                reason = "no permission to touch the specified keys";
+                break;
+            case ACL_DENIED_CHANNEL:
+                reason = "no permission to access one of the channels used "
+                         "as arguments";
+                break;
+            default:
+                reason = "no permission";
+                break;
+            }
+            addACLLogEntry(c,acl_retval,acl_errpos,NULL);
+            addReplyErrorFormat(c,
+                "-NOPERM ACLs rules changed between the moment the "
+                "transaction was accumulated and the EXEC call. "
+                "This command is no longer allowed for the "
+                "following reason: %s", reason);
+        } else {
+			// 最终调用call函数，批量执行事务命令
+            call(c,server.loading ? CMD_CALL_NONE : CMD_CALL_FULL);
+            serverAssert((c->flags & CLIENT_BLOCKED) == 0);
+        }
+
+        /* Commands may alter argc/argv, restore mstate. */
+        c->mstate.commands[j].argc = c->argc;
+        c->mstate.commands[j].argv = c->argv;
+        c->mstate.commands[j].cmd = c->cmd;
+    }
+
+    // restore old DENY_BLOCKING value
+    if (!(old_flags & CLIENT_DENY_BLOCKING))
+        c->flags &= ~CLIENT_DENY_BLOCKING;
+
+    c->argv = orig_argv;
+    c->argc = orig_argc;
+    c->cmd = orig_cmd;
+    discardTransaction(c);		// 恢复状态，unwatch所有的key
+
+    /* Make sure the EXEC command will be propagated as well if MULTI
+     * was already propagated. */
+     // 是否需要将multi命令进行传播
+    if (server.propagate_in_transaction) {
+        int is_master = server.masterhost == NULL;
+        server.dirty++;
+        /* If inside the MULTI/EXEC block this instance was suddenly
+         * switched from master to slave (using the SLAVEOF command), the
+         * initial MULTI was propagated into the replication backlog, but the
+         * rest was not. We need to make sure to at least terminate the
+         * backlog with the final EXEC. */
+        if (server.repl_backlog && was_master && !is_master) {
+            char *execcmd = "*1\r\n$4\r\nEXEC\r\n";
+			// 添加数据到backlog中，等待有事件去执行back_log的复制操作
+            feedReplicationBacklog(execcmd,strlen(execcmd));
+        }
+        afterPropagateExec();
+    }
+
+    server.in_exec = 0;
+}
+```
+
+### 17.5、redis核心函数之call
+
+```c
+/* Call() is the core of Redis execution of a command.
+ *
+ * The following flags can be passed:
+ * CMD_CALL_NONE        No flags.
+ * CMD_CALL_SLOWLOG     Check command speed and log in the slow log if needed.
+ * CMD_CALL_STATS       Populate command stats.
+ * CMD_CALL_PROPAGATE_AOF   Append command to AOF if it modified the dataset
+ *                          or if the client flags are forcing propagation.
+ * CMD_CALL_PROPAGATE_REPL  Send command to slaves if it modified the dataset
+ *                          or if the client flags are forcing propagation.
+ * CMD_CALL_PROPAGATE   Alias for PROPAGATE_AOF|PROPAGATE_REPL.
+ * CMD_CALL_FULL        Alias for SLOWLOG|STATS|PROPAGATE.
+ *
+ * The exact propagation behavior depends on the client flags.
+ * Specifically:
+ *
+ * 1. If the client flags CLIENT_FORCE_AOF or CLIENT_FORCE_REPL are set
+ *    and assuming the corresponding CMD_CALL_PROPAGATE_AOF/REPL is set
+ *    in the call flags, then the command is propagated even if the
+ *    dataset was not affected by the command.
+ * 2. If the client flags CLIENT_PREVENT_REPL_PROP or CLIENT_PREVENT_AOF_PROP
+ *    are set, the propagation into AOF or to slaves is not performed even
+ *    if the command modified the dataset.
+ *
+ * Note that regardless of the client flags, if CMD_CALL_PROPAGATE_AOF
+ * or CMD_CALL_PROPAGATE_REPL are not set, then respectively AOF or
+ * slaves propagation will never occur.
+ *
+ * Client flags are modified by the implementation of a given command
+ * using the following API:
+ *
+ * forceCommandPropagation(client *c, int flags);
+ * preventCommandPropagation(client *c);
+ * preventCommandAOF(client *c);
+ * preventCommandReplication(client *c);
+ *
+ */
+ // redis 得核心调用方法
+void call(client *c, int flags) {
+    long long dirty;
+    monotime call_timer;
+    int client_old_flags = c->flags;
+    struct redisCommand *real_cmd = c->cmd;	// 拿到真正得redis命令
+    static long long prev_err_count;
+
+    /* Initialization: clear the flags that must be set by the command on
+     * demand, and initialize the array for additional commands propagation. */
+    c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);	
+    redisOpArray prev_also_propagate = server.also_propagate;
+    redisOpArrayInit(&server.also_propagate);
+
+    /* Call the command. */
+    dirty = server.dirty;
+    prev_err_count = server.stat_total_error_replies;
+
+    /* Update cache time, in case we have nested calls we want to
+     * update only on the first call*/
+    if (server.fixed_time_expire++ == 0) {
+        updateCachedTime(0);
+    }
+
+    elapsedStart(&call_timer);
+    // 执行
+    c->cmd->proc(c);
+    const long duration = elapsedUs(call_timer);	// 获取命令执行得时间
+    c->duration = duration;							// 更新到client中
+    dirty = server.dirty-dirty;						// 看一下是否改变了DB位置，在proc之后
+    if (dirty < 0) dirty = 0;
+
+    /* Update failed command calls if required.
+     * We leverage a static variable (prev_err_count) to retain
+     * the counter across nested function calls and avoid logging
+     * the same error twice. */
+    if ((server.stat_total_error_replies - prev_err_count) > 0) {
+        real_cmd->failed_calls++;
+    }
+
+    /* After executing command, we will close the client after writing entire
+     * reply if it is set 'CLIENT_CLOSE_AFTER_COMMAND' flag. */
+    if (c->flags & CLIENT_CLOSE_AFTER_COMMAND) {
+        c->flags &= ~CLIENT_CLOSE_AFTER_COMMAND;
+        c->flags |= CLIENT_CLOSE_AFTER_REPLY;
+    }
+
+    /* When EVAL is called loading the AOF we don't want commands called
+     * from Lua to go into the slowlog or to populate statistics. */
+    if (server.loading && c->flags & CLIENT_LUA)
+        flags &= ~(CMD_CALL_SLOWLOG | CMD_CALL_STATS);
+
+    /* If the caller is Lua, we want to force the EVAL caller to propagate
+     * the script if the command flag or client flag are forcing the
+     * propagation. */
+    if (c->flags & CLIENT_LUA && server.lua_caller) {
+        if (c->flags & CLIENT_FORCE_REPL)
+            server.lua_caller->flags |= CLIENT_FORCE_REPL;
+        if (c->flags & CLIENT_FORCE_AOF)
+            server.lua_caller->flags |= CLIENT_FORCE_AOF;
+    }
+
+    /* Note: the code below uses the real command that was executed
+     * c->cmd and c->lastcmd may be different, in case of MULTI-EXEC or
+     * re-written commands such as EXPIRE, GEOADD, etc. */
+
+    /* Record the latency this command induced on the main thread.
+     * unless instructed by the caller not to log. (happens when processing
+     * a MULTI-EXEC from inside an AOF). */
+    if (flags & CMD_CALL_SLOWLOG) {			
+        char *latency_event = (real_cmd->flags & CMD_FAST) ?
+                               "fast-command" : "command";
+        latencyAddSampleIfNeeded(latency_event,duration/1000);	//延迟记录，如果开启了延迟监控，并设置了阈值，当大于阈值时记录(latency_monitor_threshold)
+    }
+
+    /* Log the command into the Slow log if needed.
+     * If the client is blocked we will handle slowlog when it is unblocked. */
+    if ((flags & CMD_CALL_SLOWLOG) && !(c->flags & CLIENT_BLOCKED))
+        slowlogPushCurrentCommand(c, real_cmd, duration);	// 记录慢日志
+
+    /* Send the command to clients in MONITOR mode if applicable.
+     * Administrative commands are considered too dangerous to be shown. */
+    if (!(c->cmd->flags & (CMD_SKIP_MONITOR|CMD_ADMIN))) {
+        robj **argv = c->original_argv ? c->original_argv : c->argv;
+        int argc = c->original_argv ? c->original_argc : c->argc;
+        replicationFeedMonitors(c,server.monitors,c->db->id,argv,argc);
+    }
+
+    /* Clear the original argv.
+     * If the client is blocked we will handle slowlog when it is unblocked. */
+    if (!(c->flags & CLIENT_BLOCKED))
+        freeClientOriginalArgv(c);
+
+    /* populate the per-command statistics that we show in INFO commandstats. */
+    if (flags & CMD_CALL_STATS) {
+        real_cmd->microseconds += duration;
+        real_cmd->calls++;
+    }
+
+    /* Propagate the command into the AOF and replication link */
+    // 传播：AOF，replication
+    if (flags & CMD_CALL_PROPAGATE &&
+        (c->flags & CLIENT_PREVENT_PROP) != CLIENT_PREVENT_PROP)
+    {
+        int propagate_flags = PROPAGATE_NONE;
+
+        /* Check if the command operated changes in the data set. If so
+         * set for replication / AOF propagation. */
+        if (dirty) propagate_flags |= (PROPAGATE_AOF|PROPAGATE_REPL);
+
+        /* If the client forced AOF / replication of the command, set
+         * the flags regardless of the command effects on the data set. */
+        if (c->flags & CLIENT_FORCE_REPL) propagate_flags |= PROPAGATE_REPL;
+        if (c->flags & CLIENT_FORCE_AOF) propagate_flags |= PROPAGATE_AOF;
+
+        /* However prevent AOF / replication propagation if the command
+         * implementation called preventCommandPropagation() or similar,
+         * or if we don't have the call() flags to do so. */
+        if (c->flags & CLIENT_PREVENT_REPL_PROP ||
+            !(flags & CMD_CALL_PROPAGATE_REPL))
+                propagate_flags &= ~PROPAGATE_REPL;
+        if (c->flags & CLIENT_PREVENT_AOF_PROP ||
+            !(flags & CMD_CALL_PROPAGATE_AOF))
+                propagate_flags &= ~PROPAGATE_AOF;
+
+        /* Call propagate() only if at least one of AOF / replication
+         * propagation is needed. Note that modules commands handle replication
+         * in an explicit way, so we never replicate them automatically. */
+        if (propagate_flags != PROPAGATE_NONE && !(c->cmd->flags & CMD_MODULE))
+			// 实际执行代码
+            propagate(c->cmd,c->db->id,c->argv,c->argc,propagate_flags);
+    }
+
+    /* Restore the old replication flags, since call() can be executed
+     * recursively. */
+    c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
+    c->flags |= client_old_flags &
+        (CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
+
+    /* Handle the alsoPropagate() API to handle commands that want to propagate
+     * multiple separated commands. Note that alsoPropagate() is not affected
+     * by CLIENT_PREVENT_PROP flag. */
+    if (server.also_propagate.numops) {
+        int j;
+        redisOp *rop;
+
+        if (flags & CMD_CALL_PROPAGATE) {
+            int multi_emitted = 0;
+            /* Wrap the commands in server.also_propagate array,
+             * but don't wrap it if we are already in MULTI context,
+             * in case the nested MULTI/EXEC.
+             *
+             * And if the array contains only one command, no need to
+             * wrap it, since the single command is atomic. */
+            if (server.also_propagate.numops > 1 &&
+                !(c->cmd->flags & CMD_MODULE) &&
+                !(c->flags & CLIENT_MULTI) &&
+                !(flags & CMD_CALL_NOWRAP))
+            {
+                execCommandPropagateMulti(c->db->id);
+                multi_emitted = 1;
+            }
+
+            for (j = 0; j < server.also_propagate.numops; j++) {
+                rop = &server.also_propagate.ops[j];
+                int target = rop->target;
+                /* Whatever the command wish is, we honor the call() flags. */
+                if (!(flags&CMD_CALL_PROPAGATE_AOF)) target &= ~PROPAGATE_AOF;
+                if (!(flags&CMD_CALL_PROPAGATE_REPL)) target &= ~PROPAGATE_REPL;
+                if (target)
+                    propagate(rop->cmd,rop->dbid,rop->argv,rop->argc,target);
+            }
+
+            if (multi_emitted) {
+                execCommandPropagateExec(c->db->id);
+            }
+        }
+        redisOpArrayFree(&server.also_propagate);	// 额外得命令传播？
+    }
+    server.also_propagate = prev_also_propagate;
+
+    /* Client pause takes effect after a transaction has finished. This needs
+     * to be located after everything is propagated. */
+    if (!server.in_exec && server.client_pause_in_transaction) {
+        server.client_pause_in_transaction = 0;
+    }
+
+    /* If the client has keys tracking enabled for client side caching,
+     * make sure to remember the keys it fetched via this command. */
+    if (c->cmd->flags & CMD_READONLY) {
+        client *caller = (c->flags & CLIENT_LUA && server.lua_caller) ?
+                            server.lua_caller : c;
+        if (caller->flags & CLIENT_TRACKING &&
+            !(caller->flags & CLIENT_TRACKING_BCAST))
+        {
+            trackingRememberKeys(caller);
+        }
+    }
+
+    server.fixed_time_expire--;
+    server.stat_numcommands++;
+    prev_err_count = server.stat_total_error_replies;
+
+    /* Record peak memory after each command and before the eviction that runs
+     * before the next command. */
+    size_t zmalloc_used = zmalloc_used_memory();	// 记录每个命令之后和下一个命令之前运行的收回之前的峰值内存。
+    if (zmalloc_used > server.stat_peak_memory)
+        server.stat_peak_memory = zmalloc_used;
+}
+```
+
+
+
+### 17.6、watch-dirty
+
+先看下watch下，
+
+还有看下是否dirty了，是否脏了，如果脏了，就取消watch。multi的exec不执行，不调用call
+
+最后也是调用call函数
+
+比如在，string.c 中，
+
+1. setCommand
+2. setGenericCommand
+3. genericSetKey
+4. signalModifiedKey
+
+```c
+void signalModifiedKey(client *c, redisDb *db, robj *key) {
+    touchWatchedKey(db,key);
+    trackingInvalidateKey(c,key);
+}
+```
+
+```c
+/* "Touch" a key, so that if this key is being WATCHed by some client the
+ * next EXEC will fail. */
+void touchWatchedKey(redisDb *db, robj *key) {
+    list *clients;
+    listIter li;
+    listNode *ln;
+
+    if (dictSize(db->watched_keys) == 0) return;
+    clients = dictFetchValue(db->watched_keys, key);
+    if (!clients) return;
+
+    /* Mark all the clients watching this key as CLIENT_DIRTY_CAS */
+    /* Check if we are already watching for this key */
+    listRewind(clients,&li);
+    while((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+
+        c->flags |= CLIENT_DIRTY_CAS;	// 此时这个key被操作了，那么就将这个key设置为dirty
+    }
+}
+```
+
+### 17.7、总结
+
+在cmd处理命令的时候，分别做对应的事件处理：
+
+1. 发布订阅	 __key*
+2. 阻塞        ready_keys
+3. 处理事务，watched_keys
+
+注意：redis 是单线程，对上面三个维度的操作，支撑起来了redis服务端不会被阻塞住，能够顺滑执行
+
+
+
+## lua脚本：atomic script
+
+## redisson
+
+## redlock：paxos，cap、raft
+
+## 双写一致性
+
 ### 第一阶段 熟悉Redis基础数据结构
+
 - 阅读Redis的数据结构部分，基本位于如下文件中：内存分配 zmalloc.c和zmalloc.h
 
 - 动态字符串 sds.h和sds.c

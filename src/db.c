@@ -576,8 +576,8 @@ long long dbTotalServerKeyCount() {
 /* Note that the 'c' argument may be NULL if the key was modified out of
  * a context of a client. */
 void signalModifiedKey(client *c, redisDb *db, robj *key) {
-    touchWatchedKey(db,key);
-    trackingInvalidateKey(c,key);
+    touchWatchedKey(db,key);		// 检查key是否存在，存在标记为dirty
+    trackingInvalidateKey(c,key);	// 检查是否是无效的key
 }
 
 void signalFlushedDb(int dbid, int async) {

@@ -458,6 +458,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             processed++;
         }
     }
+	// 上面for循环处理得是epoll得IO事件，会将读到得数据放到buffer中，这里处理buffer得数据，最后将处理结果返回到客户端得操作。
     /* Check time events */
     if (flags & AE_TIME_EVENTS)
         processed += processTimeEvents(eventLoop);

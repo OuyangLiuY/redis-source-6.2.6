@@ -45,9 +45,9 @@ void addReplyPubsubMessage(client *c, robj *channel, robj *msg) {
         addReply(c,shared.mbulkhdr[3]);
     else
         addReplyPushLen(c,3);
-    addReply(c,shared.messagebulk);
-    addReplyBulk(c,channel);
-    if (msg) addReplyBulk(c,msg);
+    addReply(c,shared.messagebulk);		// 单个回复
+    addReplyBulk(c,channel);			// 批量回复
+    if (msg) addReplyBulk(c,msg);		// 将msg添加到client
 }
 
 /* Send a pubsub message of type "pmessage" to the client. The difference
@@ -138,6 +138,7 @@ int pubsubSubscribeChannel(client *c, robj *channel) {
     int retval = 0;
 
     /* Add the channel to the client -> channels hash table */
+	// 添加client到channel,对应客户端哈希表
     if (dictAdd(c->pubsub_channels,channel,NULL) == DICT_OK) {
         retval = 1;
         incrRefCount(channel);
@@ -293,27 +294,29 @@ int pubsubPublishMessage(robj *channel, robj *message) {
     listIter li;
 
     /* Send to clients listening for that channel */
-    de = dictFind(server.pubsub_channels,channel);
-    if (de) {
-        list *list = dictGetVal(de);
+    de = dictFind(server.pubsub_channels,channel);	// 从channel找到key
+    if (de) {					 // de存在
+        list *list = dictGetVal(de);	// 找到list
         listNode *ln;
         listIter li;
 
-        listRewind(list,&li);
+        listRewind(list,&li);		// 反转，用于遍历
         while ((ln = listNext(&li)) != NULL) {
             client *c = ln->value;
-            addReplyPubsubMessage(c,channel,message);
+            addReplyPubsubMessage(c,channel,message);	// 添加message给channel
             receivers++;
         }
     }
     /* Send to clients listening to matching channels */
+	//  发送匹配订阅的数据到对应client
     di = dictGetIterator(server.pubsub_patterns);
     if (di) {
         channel = getDecodedObject(channel);
         while((de = dictNext(di)) != NULL) {
             robj *pattern = dictGetKey(de);
             list *clients = dictGetVal(de);
-            if (!stringmatchlen((char*)pattern->ptr,
+			// 匹配不到，跳过
+            if (!stringmatchlen((char*)pattern->ptr,	
                                 sdslen(pattern->ptr),
                                 (char*)channel->ptr,
                                 sdslen(channel->ptr),0)) continue;
@@ -321,6 +324,7 @@ int pubsubPublishMessage(robj *channel, robj *message) {
             listRewind(clients,&li);
             while ((ln = listNext(&li)) != NULL) {
                 client *c = listNodeValue(ln);
+				// 匹配成功发送
                 addReplyPubsubPatMessage(c,pattern,channel,message);
                 receivers++;
             }
@@ -352,7 +356,7 @@ void subscribeCommand(client *c) {
 
     for (j = 1; j < c->argc; j++)
         pubsubSubscribeChannel(c,c->argv[j]);
-    c->flags |= CLIENT_PUBSUB;
+    c->flags |= CLIENT_PUBSUB;		// 设置标志位
 }
 
 /* UNSUBSCRIBE [channel [channel ...]] */

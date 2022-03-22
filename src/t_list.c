@@ -233,18 +233,18 @@ void pushGenericCommand(client *c, int where, int xx) {
         }
     }
 
-    robj *lobj = lookupKeyWrite(c->db, c->argv[1]);
-    if (checkType(c,lobj,OBJ_LIST)) return;
+    robj *lobj = lookupKeyWrite(c->db, c->argv[1]);	// lookup一下当前的key，用于内存淘汰策略
+    if (checkType(c,lobj,OBJ_LIST)) return;	// 检查类型
     if (!lobj) {
         if (xx) {
             addReply(c, shared.czero);
             return;
         }
 
-        lobj = createQuicklistObject();
+        lobj = createQuicklistObject();		// 创建快表类型
         quicklistSetOptions(lobj->ptr, server.list_max_ziplist_size,
                             server.list_compress_depth);	// 设置快表得属性 fill = -2 默认
-        dbAdd(c->db,c->argv[1],lobj);
+        dbAdd(c->db,c->argv[1],lobj);	// 添加到dict
     }
 
     for (j = 2; j < c->argc; j++) {
