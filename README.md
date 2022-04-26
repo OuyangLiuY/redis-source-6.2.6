@@ -90,7 +90,7 @@ redis.conf 配置文件：
 # 默认不开启，如果开启默认配置IO数是 4 个，最大不能超过128（看源码可知）
 # io-threads 是用多线程处理《写IO》主线程exec的结果
 io-threads 4
-# 默认不开始 do read多线程，《读》 IO
+# 默认不开启 do read多线程，《读》 IO
 io-threads-do-reads no
 # NOTE 1: This configuration directive cannot be changed at runtime via
 # CONFIG SET. Aso this feature currently does not work when SSL is
@@ -223,15 +223,28 @@ load_factor = ht[0].used / ht[0].size
 - 没有在执行 BGSAVE 命令或者 BGREWRITEAOF 命令， 并且哈希表的负载因子大于等于 1
 - 正在执行 BGSAVE 命令或者 BGREWRITEAOF 命令， 并且哈希表的负载因子大于等于 5
 
+```c
+/* Using dictEnableResize() / dictDisableResize() we make possible to
+ * enable/disable resizing of the hash table as needed. This is very important
+ * for Redis, as we use copy-on-write and don't want to move too much memory
+ * around when there is a child performing saving operations.
+ *
+ * Note that even when dict_can_resize is set to 0, not all resizes are
+ * prevented: a hash table is still allowed to grow if the ratio between
+ * the number of elements and the buckets > dict_force_resize_ratio. */
+static int dict_can_resize = 1;
+static unsigned int dict_force_resize_ratio = 5;
+```
+
 redis扩容大小：
 
 在size >  4的情况下是size得2倍，否则就是4
 
 ```C
 /* Our hash table capability is a power of two */
-static unsigned long _dictNextPower(unsigned long size)
-{
-    unsigned long i = DICT_HT_INITIAL_SIZE;
+static unsigned long _dictNextPower(unsigned long size){
+	// DICT_HT_INITIAL_SIZE = 4
+  unsigned long i = DICT_HT_INITIAL_SIZE;
 
     if (size >= LONG_MAX) return LONG_MAX + 1LU;
     while(1) {
@@ -242,6 +255,59 @@ static unsigned long _dictNextPower(unsigned long size)
 }
 ```
 
+扩容函数：
+
+```c
+/* Expand or create the hash table,
+ * when malloc_failed is non-NULL, it'll avoid panic if malloc fails (in which case it'll be set to 1).
+ * Returns DICT_OK if expand was performed, and DICT_ERR if skipped. */
+int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
+{
+    if (malloc_failed) *malloc_failed = 0;		// 说明内存不够，无法扩容，但是还得返回成功
+
+    /* the size is invalid if it is smaller than the number of
+     * elements already inside the hash table */
+    if (dictIsRehashing(d) || d->ht[0].used > size)
+        return DICT_ERR;
+
+    dictht n; /* the new hash table */
+    unsigned long realsize = _dictNextPower(size);
+
+    /* Detect overflows */
+    if (realsize < size || realsize * sizeof(dictEntry*) < realsize)
+        return DICT_ERR;
+
+    /* Rehashing to the same table size is not useful. */
+    if (realsize == d->ht[0].size) return DICT_ERR;
+
+    /* Allocate the new hash table and initialize all pointers to NULL */
+	// 分配新的hash表，并初始化所有的节点为NULL
+    n.size = realsize;
+    n.sizemask = realsize-1;	// 掩码总是size -1 ，用来计算出值所在位置
+    if (malloc_failed) {
+        n.table = ztrycalloc(realsize*sizeof(dictEntry*));
+        *malloc_failed = n.table == NULL;
+        if (*malloc_failed)
+            return DICT_ERR;
+    } else
+        n.table = zcalloc(realsize*sizeof(dictEntry*));
+
+    n.used = 0;
+
+    /* Is this the first initialization? If so it's not really a rehashing
+     * we just set the first hash table so that it can accept keys. */
+    if (d->ht[0].table == NULL) {	// 初始化ht[0]
+        d->ht[0] = n;				// 将ht[0]给到d
+        return DICT_OK;
+    }
+
+    /* Prepare a second hash table for incremental rehashing */
+    d->ht[1] = n;					// 准备ht[1]，用来rehash
+    d->rehashidx = 0;
+    return DICT_OK;
+}
+```
+
 
 
 ### 3.4、Hash表执行缩容操作：
@@ -249,6 +315,68 @@ static unsigned long _dictNextPower(unsigned long size)
 触发条件：
 
 -  当哈希表的负载因子小于 0.1 时， 程序自动开始对哈希表执行收缩操作。
+
+### 3.5、ReHash
+
+```c
+/* Performs N steps of incremental rehashing. Returns 1 if there are still
+ * keys to move from the old to the new hash table, otherwise 0 is returned.
+ *
+ * Note that a rehashing step consists in moving a bucket (that may have more
+ * than one key as we use chaining) from the old to the new hash table, however
+ * since part of the hash table may be composed of empty spaces, it is not
+ * guaranteed that this function will rehash even a single bucket, since it
+ * will visit at max N*10 empty buckets in total, otherwise the amount of
+ * work it does would be unbound and the function may block for a long time. */
+int dictRehash(dict *d, int n) {
+	// 注意：这个是每次只rehash得最大数量，也就是n*10
+    int empty_visits = n*10; /* Max number of empty buckets to visit. */
+    if (!dictIsRehashing(d)) return 0;			// 再次检查是否在rehash
+
+    while(n-- && d->ht[0].used != 0) {
+        dictEntry *de, *nextde;
+
+        /* Note that rehashidx can't overflow as we are sure there are more
+         * elements because ht[0].used != 0 */
+        assert(d->ht[0].size > (unsigned long)d->rehashidx);
+        while(d->ht[0].table[d->rehashidx] == NULL) {
+            d->rehashidx++;
+            if (--empty_visits == 0) return 1;
+        }
+        de = d->ht[0].table[d->rehashidx];		// 从ht[0]得hash表中拿到entry
+        /* Move all the keys in this bucket from the old to the new hash HT */
+        while(de) {
+            uint64_t h;
+
+            nextde = de->next;
+            /* Get the index in the new hash table */
+			// 拿到(de->key)在ht[1]哈希表中得位置
+            h = dictHashKey(d, de->key) & d->ht[1].sizemask;	
+			// 将ht[1]中h位置得值给到de得next，再将de放到原来得h位置上，
+			de->next = d->ht[1].table[h];	
+            d->ht[1].table[h] = de;			// 也就是每次将新得数据都放到h位置，如果h位置存在数据，那么就作为它得next
+			// 更新0和1中used得值
+            d->ht[0].used--;
+            d->ht[1].used++;
+            de = nextde;
+        }
+        d->ht[0].table[d->rehashidx] = NULL;	// 旧得0中rehashidx位置得数再经过上个while之后旧不存在了
+        d->rehashidx++;							// 让rehashidx位置来到一下位置
+    }
+
+    /* Check if we already rehashed the whole table... */
+    if (d->ht[0].used == 0) {			// 经过上个while有可能已经将ht[0]全部移到ht[1]上了
+        zfree(d->ht[0].table);			// 释放ht[0]
+        d->ht[0] = d->ht[1];			// 交换指针给ht[0]
+        _dictReset(&d->ht[1]);			// 释放ht[1]
+        d->rehashidx = -1;				// 状态恢复
+        return 0;
+    }
+
+    /* More to rehash... */
+    return 1;
+}
+```
 
 
 
@@ -708,7 +836,7 @@ unsigned char *ziplistIndex(unsigned char *zl, int index) {
 }
 ```
 
-6.2、intset：整数集
+### 6.2、intset：整数集
 
 ## 7、redis数据类型
 
