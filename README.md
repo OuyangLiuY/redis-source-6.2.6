@@ -1266,6 +1266,10 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
 ## 9、AOF
 
+### 9.0、bgrewriteaof流程
+
+![](./images/bgrewriteaof.jpg)
+
 ### 9.1、redis之AOF调用流程：
 
 1、**定时任务中执行调用**
@@ -1990,6 +1994,95 @@ void bgrewriteaofCommand(client *c) {
 
 
 ## 10、RDB
+
+RDB过程是，将redis的数据save到磁盘上
+
+### 10.0、原理：
+
+![](.\images\rdb.png)
+
+### 10.1、bgsaveCommand
+
+```c
+/* BGSAVE [SCHEDULE] */
+void bgsaveCommand(client *c) {
+    int schedule = 0;
+
+    /* The SCHEDULE option changes the behavior of BGSAVE when an AOF rewrite
+     * is in progress. Instead of returning an error a BGSAVE gets scheduled. */
+    if (c->argc > 1) {
+        if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"schedule")) {
+            schedule = 1;
+        } else {
+            addReplyErrorObject(c,shared.syntaxerr);
+            return;
+        }
+    }
+
+    rdbSaveInfo rsi, *rsiptr;
+    rsiptr = rdbPopulateSaveInfo(&rsi);
+		// 检查是否已经存在子进程在rdb数据
+    if (server.child_type == CHILD_TYPE_RDB) {
+        addReplyError(c,"Background save already in progress");
+    } else if (hasActiveChildProcess()) {
+        if (schedule) {
+            server.rdb_bgsave_scheduled = 1;
+            addReplyStatus(c,"Background saving scheduled");
+        } else {	// 存在子进程，并且不是rdb的，那么就提示报错，因为不能有多个子进程处理
+            addReplyError(c,
+            "Another child process is active (AOF?): can't BGSAVE right now. "
+            "Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenever "
+            "possible.");
+        }
+      // 
+    } else if (rdbSaveBackground(server.rdb_filename,rsiptr) == C_OK) {
+        addReplyStatus(c,"Background saving started");
+    } else {
+        addReplyErrorObject(c,shared.err);
+    }
+}
+```
+
+### 10.2、rdbSaveBackground
+
+```c
+int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
+    pid_t childpid;
+
+    if (hasActiveChildProcess()) return C_ERR;
+
+    server.dirty_before_bgsave = server.dirty;
+    server.lastbgsave_try = time(NULL);
+	// 每次都fork出一个子进程，为什么，因为是后台进程，不影响主进程
+    if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
+        int retval;
+
+        /* Child */
+        redisSetProcTitle("redis-rdb-bgsave");
+        redisSetCpuAffinity(server.bgsave_cpulist);
+        retval = rdbSave(filename,rsi);	// 将数据写到磁盘上
+        if (retval == C_OK) {
+            sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
+        }
+        exitFromChild((retval == C_OK) ? 0 : 1);	// 写完之后，子进程退出
+    } else {
+        /* Parent */
+        if (childpid == -1) {
+            server.lastbgsave_status = C_ERR;
+            serverLog(LL_WARNING,"Can't save in background: fork: %s",
+                strerror(errno));
+            return C_ERR;
+        }
+        serverLog(LL_NOTICE,"Background saving started by pid %ld",(long) childpid);
+        server.rdb_save_time_start = time(NULL);
+        server.rdb_child_type = RDB_CHILD_TYPE_DISK;
+        return C_OK;
+    }
+    return C_OK; /* unreached */
+}
+```
+
+
 
 
 
@@ -3932,5 +4025,6 @@ void touchWatchedKey(redisDb *db, robj *key) {
 
 
 ```http
-学习规划转载:https://www.zhihu.com/question/28677076/answer/134193549
+https://www.zhihu.com/question/28677076/answer/134193549
+https://zhuanlan.zhihu.com/p/340082703
 ```

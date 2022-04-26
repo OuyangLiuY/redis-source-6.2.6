@@ -1427,18 +1427,18 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
 
     server.dirty_before_bgsave = server.dirty;
     server.lastbgsave_try = time(NULL);
-
+	// 每次都fork出一个子进程，为什么，因为是后台进程，不影响主进程
     if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
         int retval;
 
         /* Child */
         redisSetProcTitle("redis-rdb-bgsave");
         redisSetCpuAffinity(server.bgsave_cpulist);
-        retval = rdbSave(filename,rsi);
+        retval = rdbSave(filename,rsi);	// 将数据写到磁盘上
         if (retval == C_OK) {
             sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
         }
-        exitFromChild((retval == C_OK) ? 0 : 1);
+        exitFromChild((retval == C_OK) ? 0 : 1);	// 写完之后，子进程退出
     } else {
         /* Parent */
         if (childpid == -1) {
@@ -3000,6 +3000,7 @@ void bgsaveCommand(client *c) {
 
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
+	// 检查是否已经存在子进程在rdb数据
 
     if (server.child_type == CHILD_TYPE_RDB) {
         addReplyError(c,"Background save already in progress");
@@ -3007,12 +3008,13 @@ void bgsaveCommand(client *c) {
         if (schedule) {
             server.rdb_bgsave_scheduled = 1;
             addReplyStatus(c,"Background saving scheduled");
-        } else {
+        } else {	// 存在子进程，并且不是rdb的，那么就提示报错，因为不能有多个子进程处理
             addReplyError(c,
             "Another child process is active (AOF?): can't BGSAVE right now. "
             "Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenever "
             "possible.");
         }
+		// 将数据同步rdb文件中，这个文件就是一个磁盘快照
     } else if (rdbSaveBackground(server.rdb_filename,rsiptr) == C_OK) {
         addReplyStatus(c,"Background saving started");
     } else {
