@@ -481,6 +481,22 @@ struct __attribute__ ((__packed__)) sdshdr64 {
 
 ![](./images/sds原理.jpg)
 
+**SDS (Simple Dynamic String)**：
+
+- 预分配空间：扩容时会多分配冗余空间
+  - 新长度 < 1MB：双倍扩容
+  - 新长度 ≥ 1MB：每次多分配1MB
+- 惰性空间释放：缩短字符串时不立即回收内存
+
+```c
+// sds.h
+struct sdshdr {
+    int len;     // 已使用长度
+    int free;    // 剩余空间
+    char buf[];  // 实际数据
+};
+```
+
 ### 5.2、skipList：跳跃表
 
 跳跃表原理：
@@ -1268,7 +1284,20 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
 ### 9.0、bgrewriteaof流程
 
-![](./images/bgrewriteaof.jpg)
+```mermaid
+graph TD
+    A[客户端发送BGREWRITEAOF命令] --> B{服务器状态检查}
+    B -->|1. 已有BGREWRITEAOF在执行| C[返回错误]
+    B -->|2. 有BGSAVE在执行| D[延迟到BGSAVE完成后执行]
+    B -->|3. 条件允许| E[创建子进程]
+    E --> F[子进程执行AOF重写]
+    F --> G[生成新的AOF文件]
+    G --> H[信号通知父进程]
+    H --> I[父进程处理新AOF文件]
+    I --> J[替换旧AOF文件]
+```
+
+
 
 ### 9.1、redis之AOF调用流程：
 
@@ -1605,7 +1634,7 @@ int redisFork(int purpose) {
 9. fflush(fp) == EOF，将数据写入到fp代表的缓存中
 10. fsync(fileno(fp))，将fp文件写入到磁盘上
 11. 再次尝试有few times 来读取更多的数据从parent。
-    1. 如果时间小于1000，且20ms内没有等到从parent那里等到新的数据，那么就退出当前子进程
+    1. 如果 1 秒内连续 20 次都没有新数据，就认为没有更多数据可读，跳出循环，进入后续的收尾流程。
     2. aeWait，使用该方法等待从父进程中读取数据
     3. aofReadDiffFromParent，读取差量数据从parent。并将数据放到全局属性server.aof_child_diff上
 12. 此时子进程需要退出，发送`!`给父进程
@@ -1997,9 +2026,64 @@ void bgrewriteaofCommand(client *c) {
 
 RDB过程是，将redis的数据save到磁盘上
 
+```tex
+save 900 1    # 900秒内有1次修改
+save 300 10   # 300秒内有10次修改
+save 60 10000 # 60秒内有10000次修改
+```
+
+
+
 ### 10.0、原理：
 
-![](.\images\rdb.png)
+```mermaid
+graph TD
+    A[触发BGSAVE] --> B{检查条件}
+    B -->|1. 已有子进程运行| C[返回错误]
+    B -->|2. 条件允许| D[fork子进程]
+    D --> E[子进程创建临时RDB文件]
+    E --> F[遍历数据库写入数据]
+    F --> G[文件刷盘]
+    G --> H[替换旧RDB文件]
+    H --> I[发送完成信号]
+    I --> J[父进程处理统计信息]
+```
+
+### 10.0.1、流程
+
+1. **准备阶段（主进程）**：
+   - 检查是否有其他子进程运行（避免竞争）
+   - 执行`fork()`创建子进程
+   - 记录fork开始时间（用于统计）
+2. **子进程工作**：
+   - 创建临时RDB文件（名称如`temp-<pid>.rdb`）
+   - 遍历所有数据库：
+     - 写入魔数"REDIS"和版本号
+     - 按数据类型（String/Hash/List等）序列化数据
+     - 使用LZF算法压缩数据（可配置）
+   - 写入结束标志和校验和
+   - 调用`fsync()`强制刷盘
+   - 重命名临时文件为正式RDB文件（默认`dump.rdb`）
+3. **父进程处理**：
+   - 接收子进程完成信号
+   - 更新持久化相关统计信息：
+     - `lastsave`：最后成功保存时间
+     - `rdb_last_bgsave_status`：状态标记
+   - 清理子进程资源
+
+**注意：**
+
+1. - **写时复制(Copy-On-Write)**：
+     - fork出的子进程共享父进程内存空间
+     - 只有被修改的页才会被复制
+     - 最大限度减少内存开销
+   - **数据一致性保证**：
+     - 子进程看到fork时刻的数据快照
+     - 主进程继续处理写请求
+     - 新写入数据不会影响RDB内容
+   - **文件处理**：
+     - 先写临时文件，完成后原子替换
+     - 避免损坏的RDB文件影响正常使用
 
 ### 10.1、bgsaveCommand
 
@@ -2082,7 +2166,24 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
 }
 ```
 
+### 10.3、特殊情况说明
 
+BGSAVE 和 BGREWRITEAOF 的互斥
+
+| 当前活动 \ 新请求      | BGSAVE   | BGREWRITEAOF |
+| :--------------------- | :------- | :----------- |
+| **无后台进程**         | 立即执行 | 立即执行     |
+| **BGSAVE运行中**       | 拒绝     | 延迟执行*    |
+| **BGREWRITEAOF运行中** | 拒绝     | 拒绝         |
+
+**注：**当 BGSAVE 运行时收到 BGREWRITEAOF 请求，会设置 `aof_rewrite_scheduled` 标志，在 BGSAVE 完成后自动触发 BGREWRITEAOF
+
+1. **RDB和普通AOF追加**：
+   - 可以同时进行（BGSAVE + AOF追加写入）
+   - 因为普通AOF追加只是追加操作，不涉及重写
+2. **SHUTDOWN时的特殊处理**：
+   - 如果配置了`save`参数，shutdown时会尝试执行最后的RDB保存
+   - 此时如果有未完成的AOF重写会被取消
 
 
 
@@ -2222,7 +2323,324 @@ rdb的发送用的 在 eventLoop中执行
 
 ## 12、redis集群
 
+### 12.0、集群核心原理
+
+**1. 数据分片（Sharding）**
+
+- 哈希槽（Hash Slots）：Redis 集群将整个数据空间划分为 16384 个哈希槽（0-16383）。
+
+- 槽位分配：每个节点负责处理一部分哈希槽，通过 CRC16(key) % 16384 计算 key 属于哪个槽位。
+
+- 动态重分片：集群支持在线添加/删除节点，槽位可以重新分配。
+
+**2. 节点角色**
+
+- 主节点（Master）：负责处理读写请求，存储数据。
+
+- 从节点（Slave/Replica）：复制主节点数据，提供读服务，主节点故障时自动升级为主节点。
+
+**3. 一致性哈希**
+
+- 使用 CRC16 算法计算 key 的哈希值，然后对 16384 取模确定槽位。
+
+- 槽位到节点的映射关系存储在集群状态中，所有节点都维护这个映射表。
+
+**4.集群通信协议**
+
+- Gossip 协议：节点间通过 gossip 协议交换集群状态信息。
+
+- 心跳检测：定期发送 ping/pong 消息检测节点存活状态。
+
+- 故障检测：通过投票机制检测节点故障。
+
+### 12.1、集群架构
+
+1. 节点间通信
+
+   ```text
+   节点A ←→ 节点B ←→ 节点C
+     ↓        ↓        ↓
+   客户端   客户端    客户端
+   ```
+
+   
+
+2. 数据路由
+
+- 客户端连接任意节点，如果请求的 key 不在当前节点，会返回 MOVED 错误，告知客户端正确的节点。
+
+- 客户端缓存槽位到节点的映射关系，减少重定向。
+
+3. 故障转移
+
+- 当主节点故障时，从节点通过投票机制选举新的主节点。
+
+- 故障转移过程是自动的，无需人工干预。
+
+### 12.2、集群命令
+
+1. 集群管理命令
+
+   ```bash
+   # 创建集群
+   redis-cli --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002
+   
+   # 添加节点
+   redis-cli --cluster add-node 127.0.0.1:7003 127.0.0.1:7000
+   
+   # 重新分片
+   redis-cli --cluster reshard 127.0.0.1:7000
+   ```
+
+   
+
+2. 集群状态查看
+
+   ```bash
+   # 查看集群信息
+   redis-cli -p 7000 cluster info
+   
+   # 查看节点信息
+   redis-cli -p 7000 cluster nodes
+   
+   # 查看槽位分配
+   redis-cli -p 7000 cluster slots
+   ```
+
+   
+
+### 12.3、集群特性
+
+1. 优点
+
+- 高可用性：主从复制 + 自动故障转移。
+
+- 可扩展性：支持在线添加/删除节点。
+
+- 数据一致性：强一致性保证。
+
+2. 限制
+
+- 不支持多键操作：如 MGET、MSET 等跨槽位的操作。
+
+- 不支持事务：涉及多个槽位的操作无法保证原子性。
+
+- Lua 脚本限制：脚本中的 key 必须在同一个槽位。
+
+### 12.4、集群配置示例
+
+1. 节点配置文件（redis.conf）
+
+   ```conf
+   port 7000
+   cluster-enabled yes
+   cluster-config-file nodes-7000.conf
+   cluster-node-timeout 15000
+   appendonly yes
+   ```
+
+   
+
+2. 集群创建
+
+   ```bash
+   # 启动 6 个节点（3 主 3 从）
+   redis-server redis-7000.conf
+   redis-server redis-7001.conf
+   # ... 其他节点
+   
+   # 创建集群
+   redis-cli --cluster create \
+     127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+     127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
+     --cluster-replicas 1
+   ```
+
+   
+
+### 12.5、总结
+
+Redis 集群通过哈希槽分片、主从复制、自动故障转移等机制，实现了高可用、可扩展的分布式数据存储。核心原理是将数据空间划分为 16384 个槽位，通过一致性哈希算法将数据分散到多个节点上，并通过 gossip 协议维护集群状态。
+
+### 12.6、源码分析
+
+
+
 ## 13、哨兵
+
+### 13.1. 哨兵架构
+
+哨兵是一个独立的进程，可以部署多个哨兵实例来监控同一个 Redis 集群。哨兵之间通过 gossip 协议进行通信，共同监控主从节点的状态。
+
+架构图：
+
+```
+哨兵1 ←→ 哨兵2 ←→ 哨兵3
+
+ ↓    ↓    ↓
+
+主节点 ←→ 从节点1 ←→ 从节点2
+```
+
+```mermaid
+sequenceDiagram
+    participant S1 as Sentinel1
+    participant S2 as Sentinel2
+    participant S3 as Sentinel3
+    participant M as Master
+    participant R as Replica
+    
+    S1->>S2: is-master-down-by-addr (投票请求)
+    S2->>S1: 同意
+    S3->>S1: 同意
+    Note right of S1: 达成客观下线
+    S1->>S1: 选举Leader Sentinel
+    S1->>R: 检查从节点状态
+    S1->>R: SLAVEOF no one (提升为主)
+    S1->>Other Replicas: SLAVEOF new_master
+```
+
+
+
+### 13.2. 哨兵功能
+
+1. 监控（Monitoring）：哨兵会定期检查主从节点是否按预期工作
+
+2. 通知（Notification）：当被监控的节点出现问题时，哨兵可以通过 API 通知管理员或其他应用程序
+3. 自动故障转移（Automatic failover）：当主节点不能正常工作时，哨兵会自动将一个从节点升级为新的主节点
+4. 配置提供者（Configuration provider）：客户端连接 Redis 集群时，会先询问哨兵获取当前主节点的地址
+
+### 13.3. 哨兵工作流程
+
+3.1 主观下线（Subjective Down）
+
+- 每个哨兵实例会定期向主从节点发送 PING 命令
+
+- 如果在 down-after-milliseconds 时间内没有收到有效回复，哨兵会将该节点标记为"主观下线"
+
+- 主观下线是单个哨兵的判断，不代表节点真的故障
+
+3.2 客观下线（Objective Down）
+
+- 当哨兵将一个主节点标记为主观下线后，会询问其他哨兵是否也认为该主节点下线
+
+- 如果超过 quorum 数量的哨兵都认为主节点下线，则将该主节点标记为"客观下线"
+
+- 客观下线是多个哨兵的共同判断，表示主节点确实故障
+
+3.3 故障转移
+
+1. 选举领头哨兵：当主节点被标记为客观下线后，哨兵们会选举一个领头哨兵来执行故障转移
+2. 选择新主节点：领头哨兵会从从节点中选择一个作为新的主节点
+3. 执行故障转移：
+
+- 将选中的从节点升级为主节点
+
+- 让其他从节点复制新的主节点
+
+- 将旧的主节点设置为新主节点的从节点（当它重新上线时）
+
+### 13.4. 哨兵配置示例
+
+conf
+
+```c
+port 26379
+
+sentinel monitor mymaster 127.0.0.1 6379 2
+
+sentinel down-after-milliseconds mymaster 5000
+
+sentinel failover-timeout mymaster 10000
+
+sentinel parallel-syncs mymaster 1
+```
+
+配置说明：
+
+- sentinel monitor mymaster 127.0.0.1 6379 2：监控名为 mymaster 的主节点，IP 为 127.0.0.1，端口为 6379，quorum 为 2
+
+- sentinel down-after-milliseconds mymaster 5000：5 秒内没有回复则认为节点下线
+
+- sentinel failover-timeout mymaster 10000：故障转移超时时间为 10 秒
+
+- sentinel parallel-syncs mymaster 1：故障转移时，同时向新主节点同步的从节点数量为 1
+
+### 13.5. 哨兵命令
+
+```bash
+
+# 启动哨兵
+
+redis-sentinel sentinel.conf
+
+# 查看哨兵信息
+
+redis-cli -p 26379 sentinel master mymaster
+
+redis-cli -p 26379 sentinel slaves mymaster
+
+redis-cli -p 26379 sentinel sentinels mymaster
+
+# 手动故障转移
+
+redis-cli -p 26379 sentinel failover mymaster
+```
+
+
+
+### 13.6. 客户端连接
+
+客户端连接 Redis 集群时，会先连接哨兵获取主节点信息：
+
+```python
+# Python 示例
+import redis
+from redis.sentinel import Sentinel
+
+# 连接哨兵
+sentinel = Sentinel([('localhost', 26379), ('localhost', 26380), ('localhost', 26381)])
+
+# 获取主节点连接
+master = sentinel.master_for('mymaster')
+
+# 获取从节点连接
+slave = sentinel.slave_for('mymaster')
+```
+
+
+
+### 13.7. 哨兵选举算法
+
+哨兵使用 Raft 算法进行领头哨兵的选举：
+
+1. 投票阶段：每个哨兵向其他哨兵请求投票
+
+2. 选举阶段：获得多数票的哨兵成为领头哨兵
+
+3. 任期：每个领头哨兵有一个任期，任期结束后重新选举
+
+### 13.8. 哨兵优缺点
+
+优点：
+
+- 自动故障转移，无需人工干预
+
+- 配置简单，易于部署
+
+- 支持多个哨兵实例，提高可靠性
+
+缺点：
+
+- 故障转移期间可能有短暂的服务中断
+
+- 需要额外的哨兵进程资源
+
+- 配置相对复杂
+
+**总结**
+
+Redis 哨兵通过监控、通知、自动故障转移和配置提供等功能，实现了 Redis 主从集群的高可用。哨兵之间通过 gossip 协议通信，共同维护集群状态，确保在主节点故障时能够自动切换到从节点，保证服务的连续性。
 
 ## 14、内存分配
 
@@ -2438,6 +2856,8 @@ void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable) {
 
 
 ## 15、阻塞：blocking
+
+Redis 的 blocking 操作通过阻塞客户端连接来实现等待机制，主要用于消息队列、任务处理、发布订阅等场景。核心实现包括阻塞状态管理、超时处理、解除阻塞机制等。合理使用 blocking 操作可以实现高效的异步处理模式
 
 block 阻塞是根据如下redisDb结构体中所定义得：
 
@@ -2736,7 +3156,7 @@ void pushGenericCommand(client *c, int where, int xx) {
 
 
 
-### 15.7、addReply
+### 15.7、addReply 
 
 ```c
 /* -----------------------------------------------------------------------------
@@ -3920,7 +4340,640 @@ void touchWatchedKey(redisDb *db, robj *key) {
 
 注意：redis 是单线程，对上面三个维度的操作，支撑起来了redis服务端不会被阻塞住，能够顺滑执行
 
+## 18、Pipe 管道
 
+### 18.1. 什么是 Redis 管道？
+
+Redis 管道是一种客户端技术，允许客户端将多个命令打包发送给服务器，服务器按顺序执行这些命令，然后将所有结果一次性返回给客户端。
+
+### 18.2. 管道的优势
+
+- 减少网络往返：多个命令只需要一次网络往返
+
+- 提高吞吐量：显著提高命令执行效率
+
+- 降低延迟：减少网络延迟的影响
+
+- 简化客户端代码：批量处理多个命令
+
+### 18.3、管道工作原理
+
+传统模式 vs 管道模式
+
+#### 18.3.1 传统模式（无管道）
+
+```
+客户端 → 命令1 → 服务器
+客户端 ← 响应1 ← 服务器
+客户端 → 命令2 → 服务器
+客户端 ← 响应2 ← 服务器
+客户端 → 命令3 → 服务器
+客户端 ← 响应3 ← 服务器
+```
+
+#### 18.3.2 管道模式
+
+```
+客户端 → [命令1, 命令2, 命令3] → 服务器
+客户端 ← [响应1, 响应2, 响应3] ← 服务器
+```
+
+
+
+### 18.4. 管道执行流程
+
+#### 18.4.1 客户端发送阶段
+
+1. 客户端将多个命令缓存到缓冲区
+
+1. 一次性发送所有命令到服务器
+
+1. 等待服务器响应
+
+#### 18.4.2 服务器处理阶段
+
+1. 服务器按顺序接收所有命令
+
+1. 按顺序执行每个命令
+
+1. 将每个命令的结果缓存
+
+1. 一次性返回所有结果
+
+#### 18.4.3 客户端接收阶段
+
+1. 客户端接收所有响应
+
+1. 按顺序解析每个响应
+
+1. 返回给应用程序
+
+### 18.5、Redis 管道实现原理
+
+#### 18.5.1. 客户端实现
+
+   管道缓冲区实现：
+
+```c
+typedef struct redisContext {
+    // ... 其他字段
+    sds obuf;              /* 输出缓冲区 */
+    redisReply *reply;     /* 当前回复 */
+    struct {
+        char *buf;
+        size_t pos;
+        size_t len;
+        size_t max;
+    } reader;              /* 读取器 */
+} redisContext;
+```
+
+命令发送：
+
+```c
+// 将命令添加到输出缓冲区
+int redisAppendCommand(redisContext *c, const char *format, ...) {
+    va_list ap;
+    int len;
+    char *cmd;
+    
+    va_start(ap, format);
+    len = redisvFormatCommand(&cmd, format, ap);
+    va_end(ap);
+    
+    if (len == -1) {
+        return REDIS_ERR;
+    }
+    
+    if (redisBufferWrite(c, cmd, len) != REDIS_OK) {
+        free(cmd);
+        return REDIS_ERR;
+    }
+    
+    free(cmd);
+    return REDIS_OK;
+}
+
+// 写入缓冲区
+int redisBufferWrite(redisContext *c, const char *buf, size_t len) {
+    if (c->obuf == NULL) {
+        c->obuf = sdsempty();
+    }
+    
+    c->obuf = sdscatlen(c->obuf, buf, len);
+    return REDIS_OK;
+}
+```
+
+批量发送：
+
+```c
+// 发送缓冲区中的所有命令
+int redisGetReply(redisContext *c, void **reply) {
+    if (redisBufferRead(c) != REDIS_OK)
+        return REDIS_ERR;
+    
+    return redisGetReplyFromReader(c, reply);
+}
+
+// 读取服务器响应
+int redisBufferRead(redisContext *c) {
+    char buf[1024*16];
+    int nread;
+    
+    // 发送输出缓冲区中的数据
+    if (sdslen(c->obuf) > 0) {
+        nread = write(c->fd, c->obuf, sdslen(c->obuf));
+        if (nread == -1) {
+            return REDIS_ERR;
+        }
+        sdsrange(c->obuf, nread, -1);
+    }
+    
+    // 读取服务器响应
+    nread = read(c->fd, buf, sizeof(buf));
+    if (nread == -1) {
+        return REDIS_ERR;
+    }
+    
+    if (c->reader.buf == NULL) {
+        c->reader.buf = malloc(1024*16);
+        c->reader.max = 1024*16;
+    }
+    
+    // 扩展缓冲区
+    if (c->reader.pos + nread > c->reader.max) {
+        char *new_buf = realloc(c->reader.buf, c->reader.pos + nread);
+        if (new_buf == NULL) {
+            return REDIS_ERR;
+        }
+        c->reader.buf = new_buf;
+        c->reader.max = c->reader.pos + nread;
+    }
+    
+    memcpy(c->reader.buf + c->reader.pos, buf, nread);
+    c->reader.len = c->reader.pos + nread;
+    
+    return REDIS_OK;
+}
+```
+
+
+
+#### 18.5.2. 服务器端处理
+
+命令接收：
+
+```c
+// 在 src/networking.c 中
+void readQueryFromClient(connection *conn) {
+    client *c = connGetPrivateData(conn);
+    int nread, readlen;
+    size_t qblen;
+    
+    // 读取客户端数据
+    nread = connRead(c->conn, c->querybuf+qblen, readlen);
+    if (nread == -1) {
+        if (connGetState(conn) == CONN_STATE_CONNECTED) {
+            return;
+        } else {
+            serverLog(LL_VERBOSE, "Error reading from client: %s",
+                connGetLastError(c->conn));
+            freeClientAsync(c);
+            return;
+        }
+    } else if (nread == 0) {
+        serverLog(LL_VERBOSE, "Client closed connection");
+        freeClientAsync(c);
+        return;
+    }
+    
+    c->querybuf_peak = sdslen(c->querybuf);
+    c->querybuf = sdsMakeRoomFor(c->querybuf, nread);
+    sdsIncrLen(c->querybuf, nread);
+    c->lastinteraction = server.unixtime;
+    
+    // 处理命令
+    processInputBuffer(c);
+}
+```
+
+命令处理:
+
+```c
+void processInputBuffer(client *c) {
+    server.current_client = c;
+    
+    while(sdslen(c->querybuf)) {
+        // 解析命令
+        if (c->reqtype == 0) {
+            if (c->querybuf[0] == '*') {
+                c->reqtype = PROTO_REQ_MULTIBULK;
+            } else {
+                c->reqtype = PROTO_REQ_INLINE;
+            }
+        }
+        
+        if (c->reqtype == PROTO_REQ_INLINE) {
+            if (processInlineBuffer(c) != C_OK) break;
+        } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
+            if (processMultibulkBuffer(c) != C_OK) break;
+        } else {
+            serverPanic("Unknown request type");
+        }
+        
+        // 执行命令
+        if (c->argc == 0) {
+            resetClient(c);
+        } else {
+            if (processCommand(c) == C_ERR) {
+                break;
+            }
+        }
+    }
+    
+    server.current_client = NULL;
+}
+```
+
+响应发送:
+
+```c
+void addReply(client *c, robj *obj) {
+    if (prepareClientToWrite(c) != C_OK) return;
+    
+    if (sdslen(c->buf) == 0 && listLength(c->reply) == 0 &&
+        (c->flags & CLIENT_PENDING_WRITE) == 0)
+    {
+        c->sentlen = 0;
+        c->flags |= CLIENT_PENDING_WRITE;
+        listAddNodeHead(server.clients_pending_write,c);
+    }
+    
+    if (obj->encoding == OBJ_ENCODING_RAW) {
+        if (sdslen(c->buf) == 0) {
+            c->buf = obj->ptr;
+            c->bufpos = 0;
+        } else {
+            listAddNodeTail(c->reply,obj);
+        }
+    } else {
+        listAddNodeTail(c->reply,obj);
+    }
+    incrRefCount(obj);
+}
+```
+
+### 18.6. Redis 管道使用示例
+
+### 18.6.1. 基本管道操作
+
+使用 hiredis 库
+
+```c
+#include <hiredis/hiredis.h>
+
+int main() {
+    redisContext *c = redisConnect("127.0.0.1", 6379);
+    if (c == NULL || c->err) {
+        if (c) {
+            printf("Error: %s\n", c->errstr);
+            redisFree(c);
+        } else {
+            printf("Can't allocate redis context\n");
+        }
+        return 1;
+    }
+    
+    // 发送多个命令
+    redisAppendCommand(c, "SET key1 value1");
+    redisAppendCommand(c, "SET key2 value2");
+    redisAppendCommand(c, "GET key1");
+    redisAppendCommand(c, "GET key2");
+    
+    // 获取所有响应
+    redisReply *reply;
+    redisGetReply(c, (void**)&reply);
+    printf("SET key1: %s\n", reply->str);
+    freeReplyObject(reply);
+    
+    redisGetReply(c, (void**)&reply);
+    printf("SET key2: %s\n", reply->str);
+    freeReplyObject(reply);
+    
+    redisGetReply(c, (void**)&reply);
+    printf("GET key1: %s\n", reply->str);
+    freeReplyObject(reply);
+    
+    redisGetReply(c, (void**)&reply);
+    printf("GET key2: %s\n", reply->str);
+    freeReplyObject(reply);
+    
+    redisFree(c);
+    return 0;
+}
+```
+
+
+
+### 18.6.2. 管道事务
+
+管道 + 事务
+
+```c
+import redis
+
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+# 创建事务管道
+pipe = r.pipeline(transaction=True)
+
+# 添加命令
+pipe.multi()
+pipe.set('key1', 'value1')
+pipe.set('key2', 'value2')
+pipe.incr('counter')
+pipe.execute()
+
+# 执行事务
+results = pipe.execute()
+print("Transaction results:", results)
+```
+
+
+
+### 18.6.3. 批量操作
+
+ 批量设置
+
+```c
+import redis
+
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+# 批量设置多个键值对
+pipe = r.pipeline()
+for i in range(1000):
+    pipe.set(f'key{i}', f'value{i}')
+
+# 执行批量操作
+pipe.execute()
+print("Bulk SET completed")
+```
+
+批量获取
+
+```c
+import redis
+
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+# 批量获取多个键
+pipe = r.pipeline()
+keys = ['key1', 'key2', 'key3', 'key4', 'key5']
+for key in keys:
+    pipe.get(key)
+
+# 执行批量操作
+results = pipe.execute()
+for key, value in zip(keys, results):
+    print(f"{key}: {value}")
+```
+
+### 18.6.4 管道性能优化
+
+### 18.6.4.1. 管道大小优化
+
+合适的管道大小
+
+```c
+import redis
+import time
+
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+# 测试不同管道大小的性能
+def test_pipeline_performance(pipeline_size):
+    start_time = time.time()
+    
+    pipe = r.pipeline()
+    for i in range(10000):
+        pipe.set(f'key{i}', f'value{i}')
+        if (i + 1) % pipeline_size == 0:
+            pipe.execute()
+            pipe = r.pipeline()
+    
+    # 执行剩余的命令
+    if pipe:
+        pipe.execute()
+    
+    end_time = time.time()
+    return end_time - start_time
+
+# 测试不同管道大小
+for size in [1, 10, 50, 100, 500, 1000]:
+    time_taken = test_pipeline_performance(size)
+    print(f"Pipeline size {size}: {time_taken:.4f} seconds")
+```
+
+最佳实践:
+
+- 小管道（1-10）：适合低延迟场景
+
+- 中等管道（50-100）：适合大多数场景
+
+- 大管道（500-1000）：适合高吞吐量场景
+
+### 18.6.4.2. 内存优化
+
+ 内存使用监控
+
+```c
+import redis
+import psutil
+import os
+
+def monitor_memory_usage():
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024  # MB
+
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+# 监控管道操作的内存使用
+print(f"Memory before: {monitor_memory_usage():.2f} MB")
+
+pipe = r.pipeline()
+for i in range(10000):
+    pipe.set(f'key{i}', f'value{i}')
+
+print(f"Memory after adding commands: {monitor_memory_usage():.2f} MB")
+
+pipe.execute()
+
+print(f"Memory after execution: {monitor_memory_usage():.2f} MB")
+```
+
+### 18.6.4. 错误处理
+
+管道错误处理
+
+```c
+import redis
+
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+try:
+    pipe = r.pipeline()
+    
+    # 添加命令
+    pipe.set('key1', 'value1')
+    pipe.incr('key1')  # 错误：对字符串执行 INCR
+    pipe.set('key2', 'value2')
+    
+    # 执行管道
+    results = pipe.execute()
+    print("Results:", results)
+    
+except redis.RedisError as e:
+    print(f"Redis error: {e}")
+except Exception as e:
+    print(f"Unexpected error: {e}")
+```
+
+### 18.6.5、管道与其他技术的对比
+
+1. 管道 vs 事务
+
+| 特性     | 管道     | 事务       |
+| :------- | :------- | :--------- |
+| 原子性   | 无       | 有         |
+| 性能     | 高       | 中等       |
+| 错误处理 | 简单     | 复杂       |
+| 使用场景 | 批量操作 | 数据一致性 |
+
+2. 管道 vs 批量命令
+
+| 特性       | 管道 | 批量命令 |
+| :--------- | :--- | :------- |
+| 灵活性     | 高   | 低       |
+| 性能       | 高   | 高       |
+| 支持的命令 | 所有 | 有限     |
+| 实现复杂度 | 中等 | 低       |
+
+3. 管道 vs 异步操作
+
+| 特性     | 管道 | 异步操作 |
+| :------- | :--- | :------- |
+| 同步性   | 同步 | 异步     |
+| 性能     | 高   | 高       |
+| 复杂度   | 低   | 高       |
+| 错误处理 | 简单 | 复杂     |
+
+## 18.7. 管道最佳实践
+
+### 18.7.1. 性能优化
+
+#### 18.7.1.1 管道大小选择
+
+```c
+# 根据场景选择合适的管道大小
+def get_optimal_pipeline_size(operation_type):
+    if operation_type == "low_latency":
+        return 10
+    elif operation_type == "high_throughput":
+        return 500
+    else:
+        return 100
+```
+
+
+
+#### 18.7.1.2 批量处理
+
+```c
+def batch_process_with_pipeline(items, batch_size=100):
+    r = redis.Redis(host='localhost', port=6379, db=0)
+    
+    for i in range(0, len(items), batch_size):
+        batch = items[i:i + batch_size]
+        pipe = r.pipeline()
+        
+        for item in batch:
+            pipe.set(f"item:{item['id']}", item['data'])
+        
+        pipe.execute()
+```
+
+
+
+### 18.7.2. 错误处理
+
+#### 18.7.2.1 重试机制
+
+```c
+import redis
+import time
+
+def execute_pipeline_with_retry(r, commands, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            pipe = r.pipeline()
+            for cmd, *args in commands:
+                getattr(pipe, cmd)(*args)
+            return pipe.execute()
+        except redis.ConnectionError:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(0.1 * (2 ** attempt))  # 指数退避
+```
+
+
+
+### 18.7.3. 监控和调试
+
+#### 18.7.3.1 性能监控
+
+```c
+import time
+import redis
+
+class PipelineMonitor:
+    def __init__(self, redis_client):
+        self.r = redis_client
+        self.stats = {'total_commands': 0, 'total_time': 0}
+    
+    def execute_pipeline(self, commands):
+        start_time = time.time()
+        
+        pipe = self.r.pipeline()
+        for cmd, *args in commands:
+            getattr(pipe, cmd)(*args)
+        
+        results = pipe.execute()
+        
+        end_time = time.time()
+        self.stats['total_commands'] += len(commands)
+        self.stats['total_time'] += (end_time - start_time)
+        
+        return results
+    
+    def get_stats(self):
+        if self.stats['total_commands'] > 0:
+            avg_time = self.stats['total_time'] / self.stats['total_commands']
+            return {
+                'total_commands': self.stats['total_commands'],
+                'total_time': self.stats['total_time'],
+                'avg_time_per_command': avg_time,
+                'commands_per_second': self.stats['total_commands'] / self.stats['total_time']
+            }
+        return self.stats
+```
+
+
+
+**总结**
+
+Redis 管道通过批量发送命令和响应，显著提高了 Redis 操作的性能。核心优势包括减少网络往返、提高吞吐量、降低延迟等。管道适用于批量操作、高吞吐量场景，但不提供原子性保证。通过合理选择管道大小、优化内存使用、实现错误处理，可以充分发挥管道的性能优势。
 
 ## lua脚本：atomic script
 
