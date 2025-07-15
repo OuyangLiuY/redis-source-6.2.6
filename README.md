@@ -497,6 +497,38 @@ struct sdshdr {
 };
 ```
 
+SDS 各部分大小（64位系统为例）：
+
+1. **RedisObject 大小**：16 字节
+
+   （包含 type、encoding、lru、refcount、ptr 等）
+
+2. **SDS Header（即 struct sdshdr8）**：3 字节
+
+   （字段：len:1B + alloc:1B + flags:1B）
+
+3. **字符串内容**：最长 **44 字节**
+
+4. **\0 结尾**：1 字节
+
+
+
+Redis 的 String 类型底层由 SDS（Simple Dynamic String）实现。
+
+
+
+>  若值是可用 64 位有符号整数表示的整数，Redis 使用 int 编码直接存储，提高空间和处理效率。
+>
+> 若值是字符串且长度不超过 44 字节（Redis 5.0+），使用 embstr 编码，此时 RedisObject 和 SDS 分配在一块连续内存中，内存访问更高效。
+>
+> 超过 44 字节的字符串使用 raw 编码，此时 RedisObject 和 SDS 分开存储，适应更大的内容但开销略高。
+>
+> Redis 的编码方式是动态可变的，取决于具体的数据值和操作。
+
+因此：当超过44字节，也就是sds最大分配64字节，那么使用raw编码，
+
+
+
 ### 5.2、skipList：跳跃表
 
 跳跃表原理：
